@@ -1,7 +1,14 @@
 use fuse_mt::FilesystemMT;
 
-struct OrganizeFS {
+#[derive(Debug, Default)]
+pub struct OrganizeFS {
 
+}
+
+impl OrganizeFS {
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl FilesystemMT for OrganizeFS {}
