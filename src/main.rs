@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use fuse_mt::spawn_mount;
 
 fn main() {
