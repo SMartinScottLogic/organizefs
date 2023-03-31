@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use common::Normalize;
 use fuse_mt::{
     DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty, ResultEntry,
     ResultOpen, ResultReaddir, ResultStatfs, Statfs,
@@ -14,7 +15,6 @@ use humansize::FormatSize;
 use itertools::Itertools;
 use tracing::{debug, error, info};
 use walkdir::WalkDir;
-use common::Normalize;
 
 mod libc_wrapper;
 
