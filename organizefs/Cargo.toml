@@ -14,9 +14,10 @@ lazy_static = "1.4.0"
 libc = "0.2.140"
 magic = "0.13.0"
 tokio = { version = "1.26.0", features = ["macros", "rt-multi-thread"] }
-tracing-core = { workspace = true }
+tracing = {workspace = true }
 tracing-subscriber = { workspace = true }
 walkdir = "2.3.3"
 
 [dependencies.common]
 path="../common"
+
