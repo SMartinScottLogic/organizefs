@@ -14,7 +14,7 @@ struct Entry {
 fn main() {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::FULL)
+        .with_span_events(FmtSpan::NONE)
         .with_thread_ids(true)
         .with_thread_names(true)
         .with_file(true)
@@ -68,22 +68,21 @@ fn main() {
 
 #[instrument(level = "debug")]
 fn get_children(files: &[Entry], pattern: &Path, cur_path: &Path) -> Vec<String> {
+    info!(cur_path = debug(cur_path), "get_children");
+    for file in files {
     for (i, path_component) in cur_path.components().enumerate() {
         let pattern_component = pattern.components().nth(i).unwrap();
-        info!(
-            path_component = debug(path_component),
-            pattern_component = debug(pattern_component),
-            "extraction 1"
-        );
-
         let pattern_component_str = pattern_component.as_os_str().to_string_lossy();
         let np = pattern_component_str
-            .replace("{meta}", "image_jpeg")
-            .replace("{size}", "12.0KB");
+            .replace("{meta}", &file.meta)
+            .replace("{size}", &file.size);
         info!(
+            file = debug(file),
+            path_component = debug(path_component),
             pattern_component = debug(pattern_component),
-            np, "extraction 2"
+            np, "extraction"
         );
+    }
     }
     Vec::new()
 }
