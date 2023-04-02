@@ -1,16 +1,34 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
-use common::Normalize;
-use tracing::{info, instrument, span, Level};
+use common::{expand, get_child_files, File, Normalize};
+use tracing::{info, span, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Entry {
     meta: String,
     size: String,
     name: String,
 }
 
+impl File for Entry {
+    fn meta(&self) -> &str {
+        self.meta.as_str()
+    }
+
+    fn size(&self) -> &str {
+        self.size.as_str()
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum FileType {
+    RegularFile,
+    Directory,
+}
 fn main() {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt()
@@ -48,13 +66,20 @@ fn main() {
             name: "1.txt".to_string(),
         },
     ];
-    let probe_path = Path::new("/t/image_jpeg/12.0KB/image_jpeg_12.0KB");
+    let probe_path = Path::new("/t/m_image_jpeg/s_12.0KB/image_jpeg_12.0KB");
     span!(Level::INFO, "components").in_scope(|| {
         for i in 0..pattern.components().count() {
-            let field = pattern.components().nth(i);
+            let field = pattern.components().nth(i + 1);
             span!(Level::INFO, "get_children", field = debug(field)).in_scope(|| {
                 let cur_path = probe_path.components().take(i + 1).collect::<PathBuf>();
-                let children = get_children(&files, &pattern, &cur_path);
+                let children = get_child_files(&files, &pattern, &cur_path);
+                let children = children
+                    .iter()
+                    .map(|c| match field {
+                        None => (FileType::RegularFile, c.name.clone()),
+                        Some(component) => (FileType::Directory, expand(&component, c)),
+                    })
+                    .collect::<HashSet<_>>();
                 info!(
                     component = debug(pattern.components().nth(i)),
                     children = debug(children),
@@ -64,25 +89,4 @@ fn main() {
             });
         }
     });
-}
-
-#[instrument(level = "debug")]
-fn get_children(files: &[Entry], pattern: &Path, cur_path: &Path) -> Vec<String> {
-    info!(cur_path = debug(cur_path), "get_children");
-    for file in files {
-    for (i, path_component) in cur_path.components().enumerate() {
-        let pattern_component = pattern.components().nth(i).unwrap();
-        let pattern_component_str = pattern_component.as_os_str().to_string_lossy();
-        let np = pattern_component_str
-            .replace("{meta}", &file.meta)
-            .replace("{size}", &file.size);
-        info!(
-            file = debug(file),
-            path_component = debug(path_component),
-            pattern_component = debug(pattern_component),
-            np, "extraction"
-        );
-    }
-    }
-    Vec::new()
 }
