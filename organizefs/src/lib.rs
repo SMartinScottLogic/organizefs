@@ -1,29 +1,39 @@
 use std::{
-    ffi::OsString,
+    collections::HashSet,
+    ffi::{OsStr, OsString},
     fmt::Display,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
-use common::Normalize;
+use common::{expand, File, Normalize};
 use fuse_mt::{
     DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty, ResultEntry,
     ResultOpen, ResultReaddir, ResultStatfs, Statfs,
 };
 use humansize::FormatSize;
 use itertools::Itertools;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 use walkdir::WalkDir;
 
 mod libc_wrapper;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OrganizeFSEntry {
     name: OsString,
     host_path: PathBuf,
     size: String,
     mime: String,
+}
+impl File for OrganizeFSEntry {
+    fn meta(&self) -> &str {
+        &self.mime
+    }
+
+    fn size(&self) -> &str {
+        &self.size
+    }
 }
 
 lazy_static::lazy_static! {
@@ -72,7 +82,7 @@ impl Display for OrganizeFSEntry {
 pub struct OrganizeFS {
     root: PathBuf,
     entries: Vec<OrganizeFSEntry>,
-    components: Vec<Component>,
+    components: PathBuf,
 }
 
 #[derive(Debug)]
@@ -99,11 +109,7 @@ impl OrganizeFS {
         let entries = Self::scan(&root);
         debug!(root = debug(&root), entries = debug(&entries), "created");
 
-        let components = PathBuf::from(&format!("/{pattern}"))
-            .normalize()
-            .components()
-            .map(Component::from)
-            .collect();
+        let components = PathBuf::from(&format!("/{pattern}")).normalize();
         Self {
             root,
             entries,
@@ -211,19 +217,37 @@ impl FilesystemMT for OrganizeFS {
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
         } else {
-            info!(components = path.components().count());
-            if path.components().count() <= 3 {
+            let field = self
+                .components
+                .components()
+                .nth(path.components().count() - 1);
+            info!(
+                components = path.components().count(),
+                pattern_components = self.components.components().count(),
+                field = debug(field)
+            );
+            if field.is_some() {
                 match libc_wrapper::lstat(&self.root) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
             } else {
-                Err(libc::ENOENT)
+                let children = common::get_child_files(&self.entries, &self.components, path);
+                let children = children
+                    .iter()
+                    .filter(|e| e.name == path.file_name().unwrap())
+                    .collect::<Vec<_>>();
+                info!(children = debug(&children));
+                if children.len() == 1 {
+                    let child = children.get(0).unwrap();
+                    match libc_wrapper::lstat(&child.host_path) {
+                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                    }
+                } else {
+                    Err(libc::ENOENT)
+                }
             }
-            // match self.stat_real(path) {
-            //     Ok(attr) => Ok((TTL, attr)),
-            //     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT))
-            // }
         }
     }
 
@@ -239,117 +263,67 @@ impl FilesystemMT for OrganizeFS {
         debug!(
             req = debug(req),
             path = debug(path),
+            components = debug(&self.components),
+            path_component_count = debug(path.components().count()),
+            pattern_count = debug(self.components.components().count()),
             flags,
             "opendir (flags = {:#o})",
             flags
         );
-        if path.components().count() <= 3 {
+        if path.components().count() <= self.components.components().count() {
             Ok((0, 0))
         } else {
             Err(libc::ENOENT)
         }
     }
 
+    #[instrument(level = "info")]
     fn readdir(&self, req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
-        debug!(req = debug(req), path = debug(path), fh, "readdir");
-        for (id, component) in path.components().enumerate() {
-            debug!(
-                actual = debug(component),
-                pattern = debug(self.components.get(id)),
-                "lookup"
-            )
-        }
-        match path.components().count() {
-            1 => {
-                let entries = self
-                    .entries
-                    .iter()
-                    .map(|e| e.mime.to_owned())
-                    .unique()
-                    .fold(
-                        vec![
-                            DirectoryEntry {
-                                name: ".".into(),
-                                kind: FileType::Directory,
-                            },
-                            DirectoryEntry {
-                                name: "..".into(),
-                                kind: FileType::Directory,
-                            },
-                        ],
-                        |mut acc, name| {
-                            acc.push(DirectoryEntry {
-                                name: name.into(),
-                                kind: FileType::Directory,
-                            });
-                            acc
-                        },
-                    );
-                Ok(entries)
-            }
-            2 => {
-                let path_name = path.file_name().unwrap().to_string_lossy();
-                let entries = self
-                    .entries
-                    .iter()
-                    .filter(|e| e.mime == path_name)
-                    .map(|e| e.size.to_owned())
-                    .unique()
-                    .fold(
-                        vec![
-                            DirectoryEntry {
-                                name: ".".into(),
-                                kind: FileType::Directory,
-                            },
-                            DirectoryEntry {
-                                name: "..".into(),
-                                kind: FileType::Directory,
-                            },
-                        ],
-                        |mut acc, name| {
-                            acc.push(DirectoryEntry {
-                                name: name.into(),
-                                kind: FileType::Directory,
-                            });
-                            acc
-                        },
-                    );
-                Ok(entries)
-            }
-            _ => Err(libc::ENOENT),
-        }
-        // let real = self.real_path(path);
-        // debug!("readdir: {:?} {:?}", path, real);
-        // let mut entries: Vec<DirectoryEntry> = vec![];
-        // // Consider using libc::readdir to prevent need for always stat-ing entries
-        // let iter = match fs::read_dir(&real) {
-        //     Ok(iter) => iter,
-        //     Err(e) => return Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-        // };
-        // for entry in iter {
-        //     match entry {
-        //         Ok(entry) => {
-        //             let real_path = entry.path();
-        //             debug!("readdir: {:?} {:?}", real, real_path);
-        //             let stat = match libc_wrapper::lstat(&real_path) {
-        //                 Ok(stat) => stat,
-        //                 Err(e) => return Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-        //             };
-        //             let filetype = Self::stat_to_filetype(&stat);
+        let field = self.components.components().nth(path.components().count());
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            pattern = debug(&self.components),
+            field = debug(field),
+            fh,
+            "readdir"
+        );
 
-        //             entries.push(DirectoryEntry {
-        //                 name: real_path.file_name().unwrap().to_os_string(),
-        //                 kind: filetype,
-        //             });
-        //         }
-        //         Err(e) => {
-        //             error!("readdir: {:?}: {}", path, e);
-        //             return Err(e.raw_os_error().unwrap_or(libc::ENOENT));
-        //         }
-        //     }
-        // }
-        // info!("entries: {:?}", entries);
-        // Ok(entries)
+        let children = common::get_child_files(&self.entries, &self.components, path);
+        let children = children
+            .iter()
+            .map(|c| match field {
+                None => (FileType::RegularFile, c.name.clone()),
+                Some(component) => (FileType::Directory, expand(&component, c).into()),
+            })
+            .unique()
+            .fold(
+                vec![
+                    DirectoryEntry {
+                        name: ".".into(),
+                        kind: FileType::Directory,
+                    },
+                    DirectoryEntry {
+                        name: "..".into(),
+                        kind: FileType::Directory,
+                    },
+                ],
+                |mut acc, (kind, name)| {
+                    acc.push(DirectoryEntry { name, kind });
+                    acc
+                },
+            );
+
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            children = debug(&children),
+            pattern = debug(&self.components),
+            field = debug(field),
+            fh,
+            "readdir"
+        );
+        Ok(children)
     }
 
     fn releasedir(&self, req: RequestInfo, path: &Path, fh: u64, flags: u32) -> ResultEmpty {

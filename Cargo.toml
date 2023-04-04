@@ -2,7 +2,7 @@
 members = [
     "common"
     , "scratch"
-    #, "organizefs"
+    , "organizefs"
 ]
 
 [workspace.dependencies]

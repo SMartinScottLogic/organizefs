@@ -2,11 +2,18 @@ use axum::{routing::get, Router};
 use fuse_mt::{spawn_mount, FuseMT};
 use organizefs::OrganizeFS;
 use std::{env, ffi::OsStr};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() {
     // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::NONE)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true)
+        .init();
 
     let args: Vec<String> = env::args().collect();
 
