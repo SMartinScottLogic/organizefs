@@ -9,8 +9,8 @@ use std::{
 
 use common::{expand, File, Normalize};
 use fuse_mt::{
-    DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty, ResultEntry,
-    ResultOpen, ResultReaddir, ResultStatfs, Statfs,
+    CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
+    ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
 };
 use humansize::FormatSize;
 use itertools::Itertools;
@@ -331,9 +331,99 @@ impl FilesystemMT for OrganizeFS {
             req = debug(req),
             path = debug(path),
             fh,
-            "opendir (flags = {:#o})",
+            "releasedir (flags = {:#o})",
             flags
         );
         Ok(())
+    }
+
+    fn open(&self, req: RequestInfo, path: &Path, flags: u32) -> ResultOpen {
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            "open (flags = {:#o})",
+            flags
+        );
+        let children = common::get_child_files(&self.entries, &self.components, path);
+        let children = children
+            .iter()
+            .filter(|e| e.name == path.file_name().unwrap())
+            .collect::<Vec<_>>();
+        info!(children = debug(&children));
+        if children.len() == 1 {
+            let child = children.get(0).unwrap();
+            match libc_wrapper::open(&child.host_path, flags.try_into().unwrap()) {
+                Ok(fh) => Ok((fh as u64, flags)),
+                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            }
+        } else {
+            Err(libc::ENOENT)
+        }
+    }
+
+    fn read(
+        &self,
+        req: RequestInfo,
+        path: &Path,
+        fh: u64,
+        offset: u64,
+        size: u32,
+        callback: impl FnOnce(ResultSlice<'_>) -> CallbackResult,
+    ) -> CallbackResult {
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            fh,
+            offset,
+            size,
+            "read"
+        );
+        if fh > 0 {
+            match libc_wrapper::read(fh.try_into().unwrap(), offset.try_into().unwrap(), size) {
+                Ok(content) => callback(Ok(content.as_slice())),
+                Err(e) => callback(Err(e.raw_os_error().unwrap_or(libc::ENOENT))),
+            }
+        } else {
+            callback(Err(libc::ENOENT))
+        }
+    }
+
+    fn flush(&self, req: RequestInfo, path: &Path, fh: u64, lock_owner: u64) -> ResultEmpty {
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            fh,
+            lock_owner,
+            "flush"
+        );
+        Err(libc::ENOSYS)
+    }
+
+    fn release(
+        &self,
+        req: RequestInfo,
+        path: &Path,
+        fh: u64,
+        flags: u32,
+        lock_owner: u64,
+        flush: bool,
+    ) -> ResultEmpty {
+        debug!(
+            req = debug(req),
+            path = debug(path),
+            fh,
+            lock_owner,
+            flush,
+            "release (flags = {:#o})",
+            flags
+        );
+        if fh > 0 {
+            match libc_wrapper::close(fh.try_into().unwrap()) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            }
+        } else {
+            Err(libc::ENOENT)
+        }
     }
 }
