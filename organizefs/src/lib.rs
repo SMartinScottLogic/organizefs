@@ -1,10 +1,10 @@
 use std::{
-    collections::HashSet,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fmt::Display,
     fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime}, sync::{Mutex, Arc},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
 };
 
 use common::{expand, File, Normalize};
@@ -14,7 +14,7 @@ use fuse_mt::{
 };
 use humansize::FormatSize;
 use itertools::Itertools;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
 mod libc_wrapper;
@@ -43,15 +43,10 @@ static ref FORMAT: humansize::FormatSizeOptions = humansize::DECIMAL.space_after
 static TTL: Duration = Duration::from_secs(1);
 
 impl OrganizeFSEntry {
-    fn new(root: &Path, entry: &walkdir::DirEntry, meta: &fs::Metadata, cookie: &magic::Cookie) -> Self {
-        // let cookie =
-        //     magic::Cookie::open(magic::CookieFlags::ERROR | magic::CookieFlags::MIME_TYPE).unwrap();
-        // cookie.load::<&str>(&[]).unwrap();
-
+    fn new(root: &Path, entry: &walkdir::DirEntry, meta: &fs::Metadata) -> Self {
         let host_path = root.join(entry.path()).canonicalize().unwrap();
         let size = meta.len().format_size(*FORMAT);
-        let mime = cookie
-            .file(&host_path)
+        let mime = tree_magic_mini::from_filepath(&host_path)
             .unwrap_or_default()
             .replace('/', "_");
         let name = entry.file_name().to_os_string();
@@ -130,14 +125,11 @@ impl OrganizeFS {
     #[instrument]
     fn scan(root: &Path) -> Vec<OrganizeFSEntry> {
         info!(root = debug(root), "scanning");
-        let cookie =
-        magic::Cookie::open(magic::CookieFlags::ERROR | magic::CookieFlags::MIME_TYPE).unwrap();
-    cookie.load::<&str>(&[]).unwrap();
-    WalkDir::new(root)
-    .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+        WalkDir::new(root)
+            .sort_by(|a, b| a.file_name().cmp(b.file_name()))
             .into_iter()
             .flatten()
-            .filter_map(|entry| Self::process(root, &entry, &cookie))
+            .filter_map(|entry| Self::process(root, &entry))
             .fold(Vec::new(), |mut acc, e| {
                 if acc.len() % 1_000 == 0 {
                     info!(entry = debug(&e), "{}", acc.len());
@@ -148,33 +140,16 @@ impl OrganizeFS {
     }
 
     #[instrument]
-    fn process(root: &Path, entry: &walkdir::DirEntry, cookie: &magic::Cookie) -> Option<OrganizeFSEntry> {
+    fn process(root: &Path, entry: &walkdir::DirEntry) -> Option<OrganizeFSEntry> {
         if entry.file_type().is_file() && entry.path().parent().is_some() {
             if let Ok(meta) = fs::symlink_metadata(entry.path()) {
-            debug!(root = debug(root), entry = debug(entry), "found");
-            let entry = OrganizeFSEntry::new(root, entry, &meta, cookie);
-            debug!(root = debug(root), entry = display(&entry));
-            return Some(entry);
+                debug!(root = debug(root), entry = debug(entry), "found");
+                let entry = OrganizeFSEntry::new(root, entry, &meta);
+                debug!(root = debug(root), entry = display(&entry));
+                return Some(entry);
             }
         }
         None
-        // if let Ok(meta) = entry.metadata() {
-        //     if meta.is_file() && entry.path().parent().is_some() {
-        //         debug!(root = debug(root), entry = debug(entry), "found");
-        //         let entry = OrganizeFSEntry::new(root, entry, &meta);
-        //         debug!(root = debug(root), entry = display(&entry));
-        //         return Some(entry);
-        //     }
-        // }
-        // if let Ok(meta) = fs::symlink_metadata(entry.path()) {
-        //     if meta.is_file() && entry.path().parent().is_some() {
-        //         debug!(root = debug(root), entry = debug(entry), "found");
-        //         let entry = OrganizeFSEntry::new(root, entry, &meta);
-        //         debug!(root = debug(root), entry = display(&entry));
-        //         return Some(entry);
-        //     };
-        // }
-        // None
     }
 
     fn statfs_to_fuse(statfs: libc::statfs) -> Statfs {

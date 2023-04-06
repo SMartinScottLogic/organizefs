@@ -1,7 +1,12 @@
-use axum::{routing::get, Router, extract::State};
+use axum::{extract::State, routing::get, Router};
 use fuse_mt::{spawn_mount, FuseMT};
 use organizefs::OrganizeFS;
-use std::{env, ffi::OsStr, str::FromStr, sync::{Mutex, Arc}};
+use std::{
+    env,
+    ffi::OsStr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -35,16 +40,19 @@ async fn main() {
 
     let stats = Arc::new(Mutex::new(0));
     let organizefs = OrganizeFS::new(&args[1], "/../s/../t/./{meta}/{size}", stats.clone());
-    return;
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 
     // build our application with a single route
     let app = Router::new()
-    .route("/", get(|| async { "Hello, World!" }))
-    .route("/stats", get(|s: State<Arc<Mutex<usize>>>| async move {
-        let stats = s.lock().unwrap();
-        format!("{}", *stats)
-    })).with_state(stats.clone());
+        .route("/", get(|| async { "Hello, World!" }))
+        .route(
+            "/stats",
+            get(|s: State<Arc<Mutex<usize>>>| async move {
+                let stats = s.lock().unwrap();
+                format!("{}", *stats)
+            }),
+        )
+        .with_state(stats.clone());
 
     // run it with hyper on localhost:3000
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
