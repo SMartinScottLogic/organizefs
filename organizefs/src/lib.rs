@@ -4,7 +4,7 @@ use std::{
     fmt::Display,
     fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime}, sync::{Mutex, Arc},
 };
 
 use common::{expand, File, Normalize};
@@ -43,10 +43,10 @@ static ref FORMAT: humansize::FormatSizeOptions = humansize::DECIMAL.space_after
 static TTL: Duration = Duration::from_secs(1);
 
 impl OrganizeFSEntry {
-    fn new(root: &Path, entry: &walkdir::DirEntry, meta: &fs::Metadata) -> Self {
-        let cookie =
-            magic::Cookie::open(magic::CookieFlags::ERROR | magic::CookieFlags::MIME_TYPE).unwrap();
-        cookie.load::<&str>(&[]).unwrap();
+    fn new(root: &Path, entry: &walkdir::DirEntry, meta: &fs::Metadata, cookie: &magic::Cookie) -> Self {
+        // let cookie =
+        //     magic::Cookie::open(magic::CookieFlags::ERROR | magic::CookieFlags::MIME_TYPE).unwrap();
+        // cookie.load::<&str>(&[]).unwrap();
 
         let host_path = root.join(entry.path()).canonicalize().unwrap();
         let size = meta.len().format_size(*FORMAT);
@@ -56,7 +56,7 @@ impl OrganizeFSEntry {
             .replace('/', "_");
         let name = entry.file_name().to_os_string();
 
-        info!(
+        debug!(
             root = debug(root),
             entry = debug(entry),
             meta = debug(meta),
@@ -103,11 +103,17 @@ impl<'a> From<std::path::Component<'a>> for Component {
 }
 
 impl OrganizeFS {
-    pub fn new(root: &str, pattern: &str) -> Self {
+    #[instrument]
+    pub fn new(root: &str, pattern: &str, stats: Arc<Mutex<usize>>) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
+
         info!(root = debug(&root), "init");
         let entries = Self::scan(&root);
-        debug!(root = debug(&root), entries = debug(&entries), "created");
+        debug!(root = debug(&root), entry_count = entries.len(), "created");
+        {
+            let mut s = stats.lock().unwrap();
+            *s = entries.len();
+        }
 
         let components = PathBuf::from(&format!("/{pattern}")).normalize();
         Self {
@@ -117,25 +123,58 @@ impl OrganizeFS {
         }
     }
 
-    fn scan(root: &Path) -> Vec<OrganizeFSEntry> {
-        info!(root = debug(root), "scanning");
-        WalkDir::new(root)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| Self::process(root, &entry))
-            .collect()
+    pub fn stats(&self) -> usize {
+        self.entries.len()
     }
 
-    fn process(root: &Path, entry: &walkdir::DirEntry) -> Option<OrganizeFSEntry> {
-        if let Ok(meta) = fs::metadata(entry.path()) {
-            if meta.is_file() && entry.path().parent().is_some() {
-                debug!(root = debug(root), entry = debug(entry), "found");
-                let entry = OrganizeFSEntry::new(root, entry, &meta);
-                info!(root = debug(root), entry = display(&entry));
-                return Some(entry);
-            };
+    #[instrument]
+    fn scan(root: &Path) -> Vec<OrganizeFSEntry> {
+        info!(root = debug(root), "scanning");
+        let cookie =
+        magic::Cookie::open(magic::CookieFlags::ERROR | magic::CookieFlags::MIME_TYPE).unwrap();
+    cookie.load::<&str>(&[]).unwrap();
+    WalkDir::new(root)
+    .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Self::process(root, &entry, &cookie))
+            .fold(Vec::new(), |mut acc, e| {
+                if acc.len() % 1_000 == 0 {
+                    info!(entry = debug(&e), "{}", acc.len());
+                }
+                acc.push(e);
+                acc
+            })
+    }
+
+    #[instrument]
+    fn process(root: &Path, entry: &walkdir::DirEntry, cookie: &magic::Cookie) -> Option<OrganizeFSEntry> {
+        if entry.file_type().is_file() && entry.path().parent().is_some() {
+            if let Ok(meta) = fs::symlink_metadata(entry.path()) {
+            debug!(root = debug(root), entry = debug(entry), "found");
+            let entry = OrganizeFSEntry::new(root, entry, &meta, cookie);
+            debug!(root = debug(root), entry = display(&entry));
+            return Some(entry);
+            }
         }
         None
+        // if let Ok(meta) = entry.metadata() {
+        //     if meta.is_file() && entry.path().parent().is_some() {
+        //         debug!(root = debug(root), entry = debug(entry), "found");
+        //         let entry = OrganizeFSEntry::new(root, entry, &meta);
+        //         debug!(root = debug(root), entry = display(&entry));
+        //         return Some(entry);
+        //     }
+        // }
+        // if let Ok(meta) = fs::symlink_metadata(entry.path()) {
+        //     if meta.is_file() && entry.path().parent().is_some() {
+        //         debug!(root = debug(root), entry = debug(entry), "found");
+        //         let entry = OrganizeFSEntry::new(root, entry, &meta);
+        //         debug!(root = debug(root), entry = display(&entry));
+        //         return Some(entry);
+        //     };
+        // }
+        // None
     }
 
     fn statfs_to_fuse(statfs: libc::statfs) -> Statfs {

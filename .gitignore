@@ -16,3 +16,5 @@ Cargo.lock
 # App specific
 /test_src/
 /test_tgt/
+perf.data
+/*.svg
