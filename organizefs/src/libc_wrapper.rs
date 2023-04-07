@@ -101,3 +101,15 @@ pub fn read(fd: i32, offset: i64, count: u32) -> io::Result<Vec<u8>> {
     }
     Ok(buf)
 }
+
+pub fn unlink(path: &PathBuf) -> io::Result<()> {
+    let cstr = CString::new(path.clone().into_os_string().as_bytes())?;
+    let result = unsafe { libc::unlink(cstr.as_ptr()) };
+    if -1 == result {
+        let e = io::Error::last_os_error();
+        error!("open({:?}): {}", path, e);
+        Err(e)
+    } else {
+        Ok(())
+    }
+}
