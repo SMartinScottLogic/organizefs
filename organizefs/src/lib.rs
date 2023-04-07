@@ -118,10 +118,6 @@ impl OrganizeFS {
         }
     }
 
-    pub fn stats(&self) -> usize {
-        self.entries.len()
-    }
-
     #[instrument]
     fn scan(root: &Path) -> Vec<OrganizeFSEntry> {
         info!(root = debug(root), "scanning");
@@ -178,10 +174,6 @@ impl OrganizeFS {
                 panic!("unknown file type");
             }
         }
-    }
-
-    fn stat_to_filetype(stat: &libc::stat) -> FileType {
-        Self::mode_to_filetype(stat.st_mode)
     }
 
     fn stat_to_fuse(stat: libc::stat) -> FileAttr {
@@ -434,6 +426,35 @@ impl FilesystemMT for OrganizeFS {
         if fh > 0 {
             match libc_wrapper::close(fh.try_into().unwrap()) {
                 Ok(_) => Ok(()),
+                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            }
+        } else {
+            Err(libc::ENOENT)
+        }
+    }
+
+    fn unlink(&self, req: RequestInfo, parent: &Path, name: &std::ffi::OsStr) -> ResultEmpty {
+        info!(
+            req = debug(req),
+            parent = debug(parent),
+            name = debug(name),
+            "unlink",
+        );
+        let mut path = parent.to_path_buf();
+        path.push(name);
+        let children = common::get_child_files(&self.entries, &self.components, &path);
+        let children = children
+            .iter()
+            .filter(|e| e.name == path.file_name().unwrap())
+            .collect::<Vec<_>>();
+        info!(children = debug(&children));
+        if children.len() == 1 {
+            let child = children.get(0).unwrap();
+            match libc_wrapper::unlink(&child.host_path) {
+                Ok(_) => {
+                    // TODO Remove file from entries
+                    Ok(())
+                }
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
         } else {
