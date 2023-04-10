@@ -2,27 +2,19 @@ use std::{
     cmp::PartialEq,
     ffi::{OsStr, OsString},
     fmt::Debug,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
 use indextree_ng::NodeId;
-use tracing::{debug, instrument, info};
+use tracing::{debug, info, instrument, error};
 
-pub(crate) enum UpsertResult {
+enum UpsertResult {
     Existing(NodeId),
     New(NodeId),
     Error(indextree_ng::IndexTreeError),
 }
 impl UpsertResult {
-    pub fn is_new(&self) -> bool {
-        matches!(*self, Self::New(_))
-    }
-
-    pub fn is_existing(&self) -> bool {
-        matches!(*self, Self::Existing(_))
-    }
-
-    pub fn unwrap(self) -> NodeId {
+    fn unwrap(self) -> NodeId {
         match self {
             Self::Existing(val) => val,
             Self::New(val) => val,
@@ -53,15 +45,27 @@ where
     pub fn is_file(&self, path: &OsStr) -> bool {
         matches!(self, Self::File(p, _) if p == path)
     }
+}
+
+#[derive(Debug)]
+pub struct FoundEntry<T> {
+    node_id: NodeId,
+    entry: Entry<T>,
+}
+impl <T> FoundEntry<T>
+where
+    T: Debug + PartialEq + Clone,
+{
+    fn new(node_id: NodeId, entry: Entry<T>) -> Self {
+        Self { node_id, entry }
+    }
 
     pub fn children<'a>(&'a self, arena: &'a Arena<T>) -> Children<T> {
-        info!(node = debug(self), "children");
-        match self {
-            Entry::Directory(p) => {
-                let path = PathBuf::from(p);
-                Children::from(arena, arena.find_node(&path))
+        match &self.entry {
+            Entry::Directory(_) => {
+                Children::from(arena, Some(self.node_id))
             }
-            _ => Children::from(arena, None)
+            _ => Children::from(arena, None),
         }
     }
 }
@@ -70,7 +74,7 @@ pub struct Children<'a, T> {
     arena: &'a Arena<T>,
     node: Option<NodeId>,
 }
-impl <'a, T> Children <'a, T> {
+impl<'a, T> Children<'a, T> {
     fn from(arena: &'a Arena<T>, node_id: Option<NodeId>) -> Self {
         Self {
             arena,
@@ -78,24 +82,33 @@ impl <'a, T> Children <'a, T> {
         }
     }
 }
-impl <'a, T> Iterator for Children<'a, T> {
+impl<'a, T> Iterator for Children<'a, T> {
     type Item = &'a Entry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.node.take() {
             Some(node) => {
-                self.node = node.following_siblings(&self.arena.arena).next();
+                self.node = node.following_siblings(&self.arena.arena).nth(1);
+                info!(node=debug(node), next=debug(self.node), "next");
                 Some(&self.arena.arena[node].data)
             }
-            None => None
+            None => None,
         }
     }
 }
 
-#[derive(Debug)]
 pub struct Arena<T> {
     arena: indextree_ng::Arena<Entry<T>>,
     root_node: NodeId,
+}
+
+impl <T> Debug for Arena<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Arena")
+        .field("arena_len", &self.arena.len())
+        .field("root_node", &self.root_node)
+        .finish()
+    }
 }
 
 impl<T> Default for Arena<T> {
@@ -127,14 +140,18 @@ where
         self.arena.is_empty()
     }
 
-    pub fn add_file(&mut self, file: &Path, entry: T) -> Result<(), ()>{
+    #[instrument]
+    pub fn add_file(&mut self, file: &Path, entry: T) -> Result<(), ()> {
         match self.add_file_internal(file, entry) {
             UpsertResult::Existing(_) => Ok(()),
             UpsertResult::New(_) => Ok(()),
-            UpsertResult::Error(e) => Err(()),        
+            UpsertResult::Error(e) => {
+                error!(file = debug(file), error = debug(e), "add_file");
+                Err(())
+            },
         }
     }
-    
+
     fn add_file_internal(&mut self, file: &Path, entry: T) -> UpsertResult {
         let mut parent = self.root_node;
         for component in file.parent().unwrap().components() {
@@ -153,32 +170,37 @@ where
     }
 
     #[instrument]
-    pub fn find(&self, file: &Path) -> Entry<T> {
+    pub fn find(&self, file: &Path) -> Option<FoundEntry<T>> {
         info!(file = debug(file), "find");
         self.find_node(file)
-            .map(|c| self.arena[c].data.to_owned())
-            .unwrap_or(Entry::None)
+            .map(|node_id| FoundEntry::new(node_id, self.arena[node_id].data.to_owned()))
     }
 
     #[instrument]
     pub(crate) fn find_node(&self, file: &Path) -> Option<NodeId> {
-        let mut parent = self.root_node;
-        for component in file.parent().unwrap().components() {
-            let new_child = match component {
-                Component::RootDir => self.root_node,
-                Component::Normal(c) => match self.find_child(c, parent) {
-                    Some(child) => child,
-                    None => return None,
-                },
-                Component::Prefix(_) => unreachable!(),
-                Component::CurDir => unreachable!(),
-                Component::ParentDir => unreachable!(),
-            };
-            debug!(component = debug(component), new_child = debug(new_child));
-            parent = new_child;
+        info!(file=debug(file), "find_node");
+        match file.parent() {
+            None => Some(self.root_node),
+            Some(p) => {
+                let mut parent = self.root_node;
+                for component in p.components() {
+                    let new_child = match component {
+                        Component::RootDir => self.root_node,
+                        Component::Normal(c) => match self.find_child(c, parent) {
+                            Some(child) => child,
+                            None => return None,
+                        },
+                        Component::Prefix(_) => unreachable!(),
+                        Component::CurDir => unreachable!(),
+                        Component::ParentDir => unreachable!(),
+                    };
+                    debug!(component = debug(component), new_child = debug(new_child));
+                    parent = new_child;
+                }
+                let name = file.file_name().unwrap();
+                self.find_child(name, parent)
+            }
         }
-        let name = file.file_name().unwrap();
-        self.find_child(name, parent)
     }
 
     fn upsert(&mut self, parent: NodeId, entry: &Entry<T>) -> UpsertResult {
@@ -239,24 +261,24 @@ mod test {
     #[traced_test]
     fn t() {
         let mut arena = Arena::new();
-        assert!(arena
+        let r = arena
             .add_file_internal(
                 &PathBuf::from("/t/file"),
                 TestFile {
                     meta: "test".into(),
                     size: "0".into()
                 }
-            )
-            .is_new());
-        assert!(arena
-            .add_file_internal(
-                &PathBuf::from("/t/file"),
-                TestFile {
-                    meta: "test".into(),
-                    size: "1".into()
-                }
-            )
-            .is_existing());
+            );
+        assert!(matches!(r, UpsertResult::New(_)));
+        let r = arena
+        .add_file_internal(
+            &PathBuf::from("/t/file"),
+            TestFile {
+                meta: "test".into(),
+                size: "1".into()
+            }
+        );
+        assert!(matches!(r, UpsertResult::Existing(_)));
         println!("{arena:#?}");
         assert_eq!(arena.len(), 3);
     }
@@ -288,7 +310,48 @@ mod test {
                 },
             )
             .unwrap();
-        let file = arena.find(&file);
-        assert!(file.is_file(&OsString::from("file.txt")));
+        let file = arena.find(&file).unwrap();
+        assert!(file.entry.is_file(&OsString::from("file.txt")));
+    }
+
+    #[test]
+    #[traced_test]
+    fn find_node_root() {
+        let mut arena = Arena::new();
+        let file = PathBuf::from("/t/test/file.txt");
+        arena
+            .add_file(
+                &file,
+                TestFile {
+                    meta: "test".into(),
+                    size: "0".into(),
+                },
+            )
+            .unwrap();
+
+        let file = PathBuf::from("/");
+        let file = arena.find_node(&file).unwrap();
+        assert_eq!(arena.root_node, file);
+    }
+
+    #[test]
+    #[traced_test]
+    fn find_node_single() {
+        let mut arena = Arena::new();
+        let file = PathBuf::from("/t/test/file.txt");
+        arena
+            .add_file(
+                &file,
+                TestFile {
+                    meta: "test".into(),
+                    size: "0".into(),
+                },
+            )
+            .unwrap();
+
+        let file = PathBuf::from("/t");
+        let file = arena.find_node(&file).unwrap();
+        let data = &arena.arena[file].data;
+        assert!(data.is_directory(&OsString::from("t")));
     }
 }

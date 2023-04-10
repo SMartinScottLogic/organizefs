@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    fmt::Display,
+    fmt::{Display, Debug},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -74,12 +74,23 @@ impl Display for OrganizeFSEntry {
         write!(f, "({} {})", self.host_path.display(), self.size)
     }
 }
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct OrganizeFS {
     root: PathBuf,
     entries: Vec<OrganizeFSEntry>,
     components: PathBuf,
     arena: Arena<OrganizeFSEntry>,
+}
+impl Debug for OrganizeFS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrganizeFS")
+        .field("root", &self.root)
+        //.field("entries", &self.entries)
+        .field("entries_len", &self.entries.len())
+        .field("components", &self.components)
+        .field("arena", &self.arena)
+        .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -294,7 +305,7 @@ impl FilesystemMT for OrganizeFS {
             "opendir (flags = {:#o})",
             flags
         );
-        if path.components().count() <= self.components.components().count() {
+        if self.arena.find(path).is_some() {
             Ok((0, 0))
         } else {
             Err(libc::ENOENT)
@@ -313,7 +324,7 @@ impl FilesystemMT for OrganizeFS {
             "readdir"
         );
 
-        for child in self.arena.find(path).children(&self.arena) {
+        for child in self.arena.find(path).unwrap().children(&self.arena) {
             debug!(child = debug(child), "arena child");
         }
 
