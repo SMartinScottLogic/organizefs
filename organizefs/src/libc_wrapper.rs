@@ -1,10 +1,4 @@
-use std::{
-    ffi::CString,
-    io,
-    mem::MaybeUninit,
-    os::unix::prelude::OsStrExt,
-    path::{Path, PathBuf},
-};
+use std::{ffi::CString, io, mem::MaybeUninit, os::unix::prelude::OsStrExt, path::PathBuf};
 
 use libc::c_void;
 use tracing::error;

@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use arena::Arena;
 use common::{expand, File, Normalize};
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
@@ -19,7 +20,7 @@ use walkdir::WalkDir;
 
 mod libc_wrapper;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct OrganizeFSEntry {
     name: OsString,
     host_path: PathBuf,
@@ -78,6 +79,7 @@ pub struct OrganizeFS {
     root: PathBuf,
     entries: Vec<OrganizeFSEntry>,
     components: PathBuf,
+    arena: Arena<OrganizeFSEntry>,
 }
 
 #[derive(Debug)]
@@ -111,10 +113,26 @@ impl OrganizeFS {
         }
 
         let components = PathBuf::from(&format!("/{pattern}")).normalize();
+        let arena = entries.iter().fold(Arena::new(), |mut arena, entry| {
+            let mut path = components
+                .components()
+                .map(|component| expand(&component, entry))
+                .fold(PathBuf::new(), |mut acc, c| {
+                    acc.push(c);
+                    acc
+                });
+            path.push(&entry.name);
+            info!(entry = debug(&entry), path = debug(&path), "add to arena");
+            arena.add_file(&path, entry.to_owned()).unwrap();
+            arena
+        });
+        info!(arena = debug(&arena), "arena populated");
+
         Self {
             root,
             entries,
             components,
+            arena,
         }
     }
 
@@ -294,6 +312,10 @@ impl FilesystemMT for OrganizeFS {
             fh,
             "readdir"
         );
+
+        for child in self.arena.find(path).children(&self.arena) {
+            debug!(child = debug(child), "arena child");
+        }
 
         let children = common::get_child_files(&self.entries, &self.components, path);
         let children = children

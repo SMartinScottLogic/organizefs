@@ -22,3 +22,5 @@ tree_magic_mini = "3.0.3"
 [dependencies.common]
 path="../common"
 
+[dependencies.arena]
+path="../arena"
