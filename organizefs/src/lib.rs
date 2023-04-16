@@ -79,19 +79,31 @@ impl Display for OrganizeFSEntry {
 struct Store {
     arena: Arena<OrganizeFSEntry>,
     entries: Vec<OrganizeFSEntry>,
+    components: PathBuf,
 }
 impl Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("arena", &self.arena)
             .field("entries", &self.entries)
+            .field("components", &self.components)
             .finish()
     }
 }
 impl Store {
     #[instrument]
-    fn add_entry(&mut self, entry: OrganizeFSEntry, components: &Path) {
-        let mut path = components
+    fn new(components: PathBuf) -> Self {
+        Self {
+            components,
+            ..Default::default()
+        }
+    }
+    #[instrument]
+    fn add_entry(&mut self, entry: OrganizeFSEntry) {
+        self.entries.push(entry.clone());
+
+        let mut path = self
+            .components
             .components()
             .map(|component| expand(&component, &entry))
             .fold(PathBuf::new(), |mut acc, c| {
@@ -100,21 +112,24 @@ impl Store {
             });
         path.push(&entry.name);
         info!(entry = debug(&entry), path = debug(&path), "add to arena");
-        self.entries.push(entry.clone());
         self.arena.add_file(&path, entry).unwrap();
     }
 
     #[instrument]
+    fn find(&self, path: &Path) -> Option<FoundEntry<OrganizeFSEntry>> {
+        self.arena.find(path)
+    }
+
+    #[instrument]
     fn find_file(&self, path: &Path) -> Option<OrganizeFSEntry> {
-        self.arena
-            .find(path)
+        self.find(path)
             .filter(|e| e.is_file())
             .and_then(|entry| entry.inner())
     }
 
     #[instrument(ret)]
     fn find_dir(&self, path: &Path) -> Option<FoundEntry<OrganizeFSEntry>> {
-        self.arena.find(path).filter(|e| e.is_directory())
+        self.find(path).filter(|e| e.is_directory())
     }
 
     fn len(&self) -> usize {
@@ -125,7 +140,6 @@ impl Store {
 #[derive(Debug, Default)]
 pub struct OrganizeFS {
     root: PathBuf,
-    components: PathBuf,
     store: Store,
 }
 
@@ -150,12 +164,11 @@ impl OrganizeFS {
     #[instrument]
     pub fn new(root: &str, pattern: &str, stats: Arc<Mutex<usize>>) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
-        let mut store = Store::default();
-        let components = PathBuf::from(&format!("/{pattern}")).normalize();
+        let mut store = Store::new(PathBuf::from(&format!("/{pattern}")).normalize());
 
         info!(root = debug(&root), "init");
         for entry in Self::scan(&root) {
-            store.add_entry(entry, &components);
+            store.add_entry(entry);
         }
         info!(store = debug(&store), "store populated");
         {
@@ -163,11 +176,7 @@ impl OrganizeFS {
             *s = store.len();
         }
 
-        Self {
-            root,
-            store,
-            components,
-        }
+        Self { root, store }
     }
 
     #[instrument]
@@ -267,45 +276,23 @@ impl FilesystemMT for OrganizeFS {
                 Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
-        } else {
-            let field = self
-                .components
-                .components()
-                .nth(path.components().count() - 1);
-            info!(
-                components = path.components().count(),
-                pattern_components = self.components.components().count(),
-                field = debug(field)
-            );
-            if field.is_some() {
+        } else if let Some(entry) = self.store.find(path) {
+            if entry.is_directory() {
                 match libc_wrapper::lstat(&self.root) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
             } else {
-                match self.store.find_file(path) {
+                match entry.inner() {
                     Some(entry) => match libc_wrapper::lstat(&entry.host_path) {
                         Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                     },
                     None => Err(libc::ENOENT),
                 }
-                // let children = common::get_child_files(&self.entries, &self.components, path);
-                // let children = children
-                //     .iter()
-                //     .filter(|e| e.name == path.file_name().unwrap())
-                //     .collect::<Vec<_>>();
-                // info!(children = debug(&children));
-                // if children.len() == 1 {
-                //     let child = children.get(0).unwrap();
-                //     match libc_wrapper::lstat(&child.host_path) {
-                //         Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                //         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                //     }
-                // } else {
-                //     Err(libc::ENOENT)
-                // }
             }
+        } else {
+            Err(libc::ENOENT)
         }
     }
 
@@ -321,9 +308,6 @@ impl FilesystemMT for OrganizeFS {
         debug!(
             req = debug(req),
             path = debug(path),
-            components = debug(&self.components),
-            path_component_count = debug(path.components().count()),
-            pattern_count = debug(self.components.components().count()),
             flags,
             "opendir (flags = {:#o})",
             flags
@@ -333,24 +317,11 @@ impl FilesystemMT for OrganizeFS {
         } else {
             Err(libc::ENOENT)
         }
-        // if self.arena.find(path).is_some() {
-        //     Ok((0, 0))
-        // } else {
-        //     Err(libc::ENOENT)
-        // }
     }
 
     #[instrument(level = "info")]
     fn readdir(&self, req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
-        let field = self.components.components().nth(path.components().count());
-        debug!(
-            req = debug(req),
-            path = debug(path),
-            pattern = debug(&self.components),
-            field = debug(field),
-            fh,
-            "readdir"
-        );
+        debug!(req = debug(req), path = debug(path), fh, "readdir");
         let children = self
             .store
             .find_dir(path)
@@ -386,51 +357,10 @@ impl FilesystemMT for OrganizeFS {
             req = debug(req),
             path = debug(path),
             children = debug(&children),
-            pattern = debug(&self.components),
-            field = debug(field),
             fh,
             "readdir"
         );
         Ok(children)
-        // for child in self.arena.find(path).unwrap().children(&self.arena) {
-        //     debug!(child = debug(child), "arena child");
-        // }
-
-        // let children = common::get_child_files(&self.entries, &self.components, path);
-        // let children = children
-        //     .iter()
-        //     .map(|c| match field {
-        //         None => (FileType::RegularFile, c.name.clone()),
-        //         Some(component) => (FileType::Directory, expand(&component, c).into()),
-        //     })
-        //     .unique()
-        //     .fold(
-        //         vec![
-        //             DirectoryEntry {
-        //                 name: ".".into(),
-        //                 kind: FileType::Directory,
-        //             },
-        //             DirectoryEntry {
-        //                 name: "..".into(),
-        //                 kind: FileType::Directory,
-        //             },
-        //         ],
-        //         |mut acc, (kind, name)| {
-        //             acc.push(DirectoryEntry { name, kind });
-        //             acc
-        //         },
-        //     );
-
-        // debug!(
-        //     req = debug(req),
-        //     path = debug(path),
-        //     children = debug(&children),
-        //     pattern = debug(&self.components),
-        //     field = debug(field),
-        //     fh,
-        //     "readdir"
-        // );
-        // Ok(children)
     }
 
     fn releasedir(&self, req: RequestInfo, path: &Path, fh: u64, flags: u32) -> ResultEmpty {
@@ -458,21 +388,6 @@ impl FilesystemMT for OrganizeFS {
             },
             None => Err(libc::ENOENT),
         }
-        // let children = common::get_child_files(&self.entries, &self.components, path);
-        // let children = children
-        //     .iter()
-        //     .filter(|e| e.name == path.file_name().unwrap())
-        //     .collect::<Vec<_>>();
-        // info!(children = debug(&children));
-        // if children.len() == 1 {
-        //     let child = children.get(0).unwrap();
-        //     match libc_wrapper::open(&child.host_path, flags.try_into().unwrap()) {
-        //         Ok(fh) => Ok((fh as u64, flags)),
-        //         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-        //     }
-        // } else {
-        //     Err(libc::ENOENT)
-        // }
     }
 
     fn read(
@@ -563,23 +478,5 @@ impl FilesystemMT for OrganizeFS {
             }
             None => Err(libc::ENOENT),
         }
-        // let children = common::get_child_files(&self.entries, &self.components, &path);
-        // let children = children
-        //     .iter()
-        //     .filter(|e| e.name == path.file_name().unwrap())
-        //     .collect::<Vec<_>>();
-        // info!(children = debug(&children));
-        // if children.len() == 1 {
-        //     let child = children.get(0).unwrap();
-        //     match libc_wrapper::unlink(&child.host_path) {
-        //         Ok(_) => {
-        //             // TODO Remove file from entries
-        //             Ok(())
-        //         }
-        //         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-        //     }
-        // } else {
-        //     Err(libc::ENOENT)
-        // }
     }
 }
