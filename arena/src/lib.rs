@@ -6,7 +6,7 @@ use std::{
 };
 
 use indextree_ng::NodeId;
-use tracing::{debug, info, instrument, error};
+use tracing::{debug, error, info, instrument};
 
 enum UpsertResult {
     Existing(NodeId),
@@ -23,7 +23,7 @@ impl UpsertResult {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Entry<T> {
     Root,
     Directory(OsString),
@@ -52,20 +52,36 @@ pub struct FoundEntry<T> {
     node_id: NodeId,
     entry: Entry<T>,
 }
-impl <T> FoundEntry<T>
+impl<T> FoundEntry<T>
 where
     T: Debug + PartialEq + Clone,
 {
     fn new(node_id: NodeId, entry: Entry<T>) -> Self {
+        info!(node_id = debug(node_id), entry = debug(&entry), "new");
         Self { node_id, entry }
     }
 
     pub fn children<'a>(&'a self, arena: &'a Arena<T>) -> Children<T> {
         match &self.entry {
-            Entry::Directory(_) => {
-                Children::from(arena, Some(self.node_id))
-            }
+            Entry::Directory(_) => Children::from(arena, Some(self.node_id)),
+            Entry::Root => Children::from(arena, Some(arena.root_node)),
             _ => Children::from(arena, None),
+        }
+    }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self.entry, Entry::Root | Entry::Directory(_))
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self.entry, Entry::File(_, _))
+    }
+
+    pub fn inner(&self) -> Option<T> {
+        if let Entry::File(_, inner) = &self.entry {
+            Some(inner.to_owned())
+        } else {
+            None
         }
     }
 }
@@ -89,7 +105,7 @@ impl<'a, T> Iterator for Children<'a, T> {
         match self.node.take() {
             Some(node) => {
                 self.node = node.following_siblings(&self.arena.arena).nth(1);
-                info!(node=debug(node), next=debug(self.node), "next");
+                info!(node = debug(node), next = debug(self.node), "next");
                 Some(&self.arena.arena[node].data)
             }
             None => None,
@@ -102,12 +118,12 @@ pub struct Arena<T> {
     root_node: NodeId,
 }
 
-impl <T> Debug for Arena<T> {
+impl<T> Debug for Arena<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Arena")
-        .field("arena_len", &self.arena.len())
-        .field("root_node", &self.root_node)
-        .finish()
+            .field("arena_len", &self.arena.len())
+            .field("root_node", &self.root_node)
+            .finish()
     }
 }
 
@@ -148,7 +164,7 @@ where
             UpsertResult::Error(e) => {
                 error!(file = debug(file), error = debug(e), "add_file");
                 Err(())
-            },
+            }
         }
     }
 
@@ -178,10 +194,11 @@ where
 
     #[instrument]
     pub(crate) fn find_node(&self, file: &Path) -> Option<NodeId> {
-        info!(file=debug(file), "find_node");
-        match file.parent() {
+        info!(file = debug(file), "find_node");
+        let r = match file.parent() {
             None => Some(self.root_node),
             Some(p) => {
+                info!(parent = debug(p), "find_node");
                 let mut parent = self.root_node;
                 for component in p.components() {
                     let new_child = match component {
@@ -200,7 +217,9 @@ where
                 let name = file.file_name().unwrap();
                 self.find_child(name, parent)
             }
-        }
+        };
+        info!(result = debug(&r), "find_node");
+        r
     }
 
     fn upsert(&mut self, parent: NodeId, entry: &Entry<T>) -> UpsertResult {
@@ -261,22 +280,20 @@ mod test {
     #[traced_test]
     fn t() {
         let mut arena = Arena::new();
-        let r = arena
-            .add_file_internal(
-                &PathBuf::from("/t/file"),
-                TestFile {
-                    meta: "test".into(),
-                    size: "0".into()
-                }
-            );
-        assert!(matches!(r, UpsertResult::New(_)));
-        let r = arena
-        .add_file_internal(
+        let r = arena.add_file_internal(
             &PathBuf::from("/t/file"),
             TestFile {
                 meta: "test".into(),
-                size: "1".into()
-            }
+                size: "0".into(),
+            },
+        );
+        assert!(matches!(r, UpsertResult::New(_)));
+        let r = arena.add_file_internal(
+            &PathBuf::from("/t/file"),
+            TestFile {
+                meta: "test".into(),
+                size: "1".into(),
+            },
         );
         assert!(matches!(r, UpsertResult::Existing(_)));
         println!("{arena:#?}");
