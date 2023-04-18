@@ -1,4 +1,4 @@
-use axum::{extract::State, routing::get, Router};
+use axum::{extract::State, routing::{get, post}, Router};
 use fuse_mt::{spawn_mount, FuseMT};
 use organizefs::OrganizeFS;
 use std::{
@@ -52,6 +52,10 @@ async fn main() {
                 format!("{}", *stats)
             }),
         )
+        .route("/pattern", post(|s: State<Arc<Mutex<usize>>>, body: String| async move {
+            let mut stats = s.lock().unwrap();
+            *stats = body.len();
+        }))
         .with_state(stats.clone());
 
     // run it with hyper on localhost:3000
