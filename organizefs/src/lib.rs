@@ -3,7 +3,7 @@ use std::{
     fmt::{Debug, Display},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
 
@@ -19,6 +19,32 @@ use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
 mod libc_wrapper;
+
+#[derive(Default)]
+pub struct OrganizeFSStore {
+    arena: Arena<usize>,
+    entries: Vec<OrganizeFSEntry>,
+    pattern: PathBuf,
+}
+impl OrganizeFSStore {
+    pub fn get_pattern(&self) -> String {
+        self.pattern.to_string_lossy().to_string()
+    }
+
+    pub fn set_pattern(&mut self, pattern: &str) {
+        let pattern = PathBuf::from(pattern).normalize();
+        if pattern != self.pattern {
+            // Re-patterning of filesystem
+            let mut arena = Arena::<usize>::default();
+            for (id, entry) in self.entries.iter().enumerate() {
+                let local_path = entry.local_path(&pattern);
+                Self::add_entry_to_arena(&mut arena, &local_path, id);
+            }
+            self.arena = arena;
+            self.pattern = pattern;
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OrganizeFSEntry {
@@ -67,6 +93,18 @@ impl OrganizeFSEntry {
             mime,
         }
     }
+
+    fn local_path(&self, pattern: &Path) -> PathBuf {
+        let mut path = pattern
+            .components()
+            .map(|component| expand(&component, self))
+            .fold(PathBuf::new(), |mut acc, c| {
+                acc.push(c);
+                acc
+            });
+        path.push(&self.name);
+        path
+    }
 }
 
 impl Display for OrganizeFSEntry {
@@ -75,72 +113,80 @@ impl Display for OrganizeFSEntry {
     }
 }
 
-#[derive(Default)]
-struct Store {
-    arena: Arena<OrganizeFSEntry>,
-    entries: Vec<OrganizeFSEntry>,
-    components: PathBuf,
-}
-impl Debug for Store {
+impl Debug for OrganizeFSStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("arena", &self.arena)
             .field("entries", &self.entries)
-            .field("components", &self.components)
+            .field("pattern", &self.pattern)
             .finish()
     }
 }
-impl Store {
+impl OrganizeFSStore {
     #[instrument]
-    fn new(components: PathBuf) -> Self {
+    pub fn new(pattern: PathBuf) -> Self {
         Self {
-            components,
+            pattern: pattern.normalize(),
             ..Default::default()
         }
     }
     #[instrument]
+    fn remove_entry(&mut self, entry: &OrganizeFSEntry) {
+        // TODO Remove file from entries
+    }
+
+    #[instrument]
     fn add_entry(&mut self, entry: OrganizeFSEntry) {
+        let id = self.entries.len();
         self.entries.push(entry.clone());
 
-        let mut path = self
-            .components
-            .components()
-            .map(|component| expand(&component, &entry))
-            .fold(PathBuf::new(), |mut acc, c| {
-                acc.push(c);
-                acc
-            });
-        path.push(&entry.name);
-        info!(entry = debug(&entry), path = debug(&path), "add to arena");
-        self.arena.add_file(&path, entry).unwrap();
+        let local_path = entry.local_path(&self.pattern);
+
+        Self::add_entry_to_arena(&mut self.arena, &local_path, id);
     }
 
     #[instrument]
-    fn find(&self, path: &Path) -> Option<FoundEntry<OrganizeFSEntry>> {
+    fn add_entry_to_arena(arena: &mut arena::Arena<usize>, local_path: &Path, id: usize) {
+        // let mut path = pattern
+        //     .components()
+        //     .map(|component| expand(&component, entry))
+        //     .fold(PathBuf::new(), |mut acc, c| {
+        //         acc.push(c);
+        //         acc
+        //     });
+        // path.push(&entry.name);
+        info!(id = debug(&id), path = debug(&local_path), "add to arena");
+        arena.add_file(&local_path, id);
+        //arena.add_file(&path, entry.to_owned()).unwrap();
+    }
+
+    #[instrument]
+    fn find(&self, path: &Path) -> Option<FoundEntry<usize>> {
         self.arena.find(path)
+        // .map(|entry| {
+        //     entry.map_file(|e| {
+        //         self.entries.get(*e).unwrap().clone()
+        //     })
+        // })
     }
 
     #[instrument]
-    fn find_file(&self, path: &Path) -> Option<OrganizeFSEntry> {
+    fn find_file(&self, path: &Path) -> Option<usize> {
         self.find(path)
             .filter(|e| e.is_file())
             .and_then(|entry| entry.inner())
     }
 
     #[instrument(ret)]
-    fn find_dir(&self, path: &Path) -> Option<FoundEntry<OrganizeFSEntry>> {
+    fn find_dir(&self, path: &Path) -> Option<FoundEntry<usize>> {
         self.find(path).filter(|e| e.is_directory())
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 
 #[derive(Debug, Default)]
 pub struct OrganizeFS {
     root: PathBuf,
-    store: Store,
+    store: Arc<RwLock<OrganizeFSStore>>,
 }
 
 #[derive(Debug)]
@@ -162,18 +208,15 @@ impl<'a> From<std::path::Component<'a>> for Component {
 
 impl OrganizeFS {
     #[instrument]
-    pub fn new(root: &str, pattern: &str, stats: Arc<Mutex<usize>>) -> Self {
+    pub fn new(root: &str, store: Arc<RwLock<OrganizeFSStore>>) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
-        let mut store = Store::new(PathBuf::from(&format!("/{pattern}")).normalize());
-
-        info!(root = debug(&root), "init");
-        for entry in Self::scan(&root) {
-            store.add_entry(entry);
-        }
-        info!(store = debug(&store), "store populated");
         {
-            let mut s = stats.lock().unwrap();
-            *s = store.len();
+            let mut store = store.write().unwrap();
+            info!(root = debug(&root), "init");
+            for entry in Self::scan(&root) {
+                store.add_entry(entry);
+            }
+            info!(store = debug(&store), "store populated");
         }
 
         Self { root, store }
@@ -276,23 +319,34 @@ impl FilesystemMT for OrganizeFS {
                 Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
-        } else if let Some(entry) = self.store.find(path) {
+        } else {
+            let store = self.store.read().unwrap();
+            if let Some(entry) = store.find(path) {
             if entry.is_directory() {
                 match libc_wrapper::lstat(&self.root) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
             } else {
-                match entry.inner() {
-                    Some(entry) => match libc_wrapper::lstat(&entry.host_path) {
+                entry.inner()
+                .map_or_else(|| Err(libc::ENOENT), |e| {
+                    let entry = store.entries.get(e).unwrap();
+                    match libc_wrapper::lstat(&entry.host_path) {
                         Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                    },
-                    None => Err(libc::ENOENT),
-                }
+                    }
+                })
+                // match entry.inner() {
+                //     Some(entry) => match libc_wrapper::lstat(&entry.host_path) {
+                //         Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                //         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                //     },
+                //     None => Err(libc::ENOENT),
+                // }
             }
-        } else {
-            Err(libc::ENOENT)
+            } else {
+                Err(libc::ENOENT)
+            }
         }
     }
 
@@ -312,7 +366,7 @@ impl FilesystemMT for OrganizeFS {
             "opendir (flags = {:#o})",
             flags
         );
-        if self.store.find_dir(path).is_some() {
+        if self.store.read().unwrap().find_dir(path).is_some() {
             Ok((0, 0))
         } else {
             Err(libc::ENOENT)
@@ -322,11 +376,12 @@ impl FilesystemMT for OrganizeFS {
     #[instrument(level = "info")]
     fn readdir(&self, req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
         debug!(req = debug(req), path = debug(path), fh, "readdir");
-        let children = self
-            .store
+
+        let store = self.store.read().unwrap();
+        let children = store
             .find_dir(path)
             .unwrap()
-            .children(&self.store.arena)
+            .children(&store.arena)
             .unique()
             .filter_map(|entry| {
                 info!(path = debug(&path), entry = debug(&entry), "child");
@@ -381,10 +436,14 @@ impl FilesystemMT for OrganizeFS {
             "open (flags = {:#o})",
             flags
         );
-        match self.store.find_file(path) {
-            Some(entry) => match libc_wrapper::open(&entry.host_path, flags.try_into().unwrap()) {
+        let store = self.store.read().unwrap();
+        match store.find_file(path) {
+            Some(e) => {
+                let entry = store.entries.get(e).unwrap();
+                match libc_wrapper::open(&entry.host_path, flags.try_into().unwrap()) {
                 Ok(fh) => Ok((fh as u64, flags)),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            }
             },
             None => Err(libc::ENOENT),
         }
@@ -466,16 +525,19 @@ impl FilesystemMT for OrganizeFS {
         let mut path = parent.to_path_buf();
         path.push(name);
 
-        match self.store.find_file(&path) {
-            Some(entry) => {
+        let mut store = self.store.write().unwrap();
+
+        match store.find_file(&path) {
+            Some(e) => {
+                let entry = store.entries.get(e).unwrap().to_owned();
                 match libc_wrapper::unlink(&entry.host_path) {
-                    Ok(_) => {
-                        // TODO Remove file from entries
-                        Ok(())
-                    }
-                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                Ok(_) => {
+                    store.remove_entry(&entry);
+                    Ok(())
                 }
+                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
+            },
             None => Err(libc::ENOENT),
         }
     }

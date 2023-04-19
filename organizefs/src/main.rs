@@ -1,14 +1,21 @@
-use axum::{extract::State, routing::{get, post}, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Router,
+};
 use fuse_mt::{spawn_mount, FuseMT};
-use organizefs::OrganizeFS;
+use organizefs::{OrganizeFS, OrganizeFSStore};
 use std::{
     env,
     ffi::OsStr,
+    path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
 };
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+type AxumState = State<Arc<RwLock<OrganizeFSStore>>>;
 
 #[tokio::main]
 async fn main() {
@@ -38,24 +45,33 @@ async fn main() {
         // OsStr::new("auto_unmount"),
     ];
 
-    let stats = Arc::new(Mutex::new(0));
-    let organizefs = OrganizeFS::new(&args[1], "/../s/../t/./{meta}/{size}", stats.clone());
+    let stats = Arc::new(RwLock::new(OrganizeFSStore::new(PathBuf::from(
+        "/../s/../t/./{meta}/{size}",
+    ))));
+    let organizefs = OrganizeFS::new(&args[1], stats.clone());
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 
-    // build our application with a single route
+    // Setup REST endpoints
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
         .route(
             "/stats",
-            get(|s: State<Arc<Mutex<usize>>>| async move {
-                let stats = s.lock().unwrap();
-                format!("{}", *stats)
+            get(|s: AxumState| async move {
+                let stats = s.read().unwrap();
+                format!("{:?}", *stats)
             }),
         )
-        .route("/pattern", post(|s: State<Arc<Mutex<usize>>>, body: String| async move {
-            let mut stats = s.lock().unwrap();
-            *stats = body.len();
-        }))
+        .route(
+            "/pattern",
+            get(|s: AxumState| async move { s.read().unwrap().get_pattern() }),
+        )
+        .route(
+            "/pattern",
+            post(|s: AxumState, body: String| async move {
+                // TODO reduce write lock time
+                s.write().unwrap().set_pattern(&body);
+            }),
+        )
         .with_state(stats.clone());
 
     // run it with hyper on localhost:3000
