@@ -86,11 +86,11 @@ where
     }
 }
 
-impl <T> FoundEntry<T> {
+impl<T> FoundEntry<T> {
     pub fn map_file<F, U>(&self, mapper: F) -> FoundEntry<U>
     where
-    F: Fn(&T) -> U,
-    U: Debug + PartialEq + Clone,
+        F: Fn(&T) -> U,
+        U: Debug + PartialEq + Clone,
     {
         let entry = match &self.entry {
             Entry::Root => Entry::Root,
@@ -98,7 +98,10 @@ impl <T> FoundEntry<T> {
             Entry::File(f, t) => Entry::File(f.clone(), mapper(t)),
             Entry::None => Entry::None,
         };
-        FoundEntry { node_id: self.node_id, entry }
+        FoundEntry {
+            node_id: self.node_id,
+            entry,
+        }
     }
 }
 

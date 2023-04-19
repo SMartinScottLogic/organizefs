@@ -147,27 +147,13 @@ impl OrganizeFSStore {
 
     #[instrument]
     fn add_entry_to_arena(arena: &mut arena::Arena<usize>, local_path: &Path, id: usize) {
-        // let mut path = pattern
-        //     .components()
-        //     .map(|component| expand(&component, entry))
-        //     .fold(PathBuf::new(), |mut acc, c| {
-        //         acc.push(c);
-        //         acc
-        //     });
-        // path.push(&entry.name);
         info!(id = debug(&id), path = debug(&local_path), "add to arena");
-        arena.add_file(&local_path, id);
-        //arena.add_file(&path, entry.to_owned()).unwrap();
+        arena.add_file(local_path, id).unwrap();
     }
 
     #[instrument]
     fn find(&self, path: &Path) -> Option<FoundEntry<usize>> {
         self.arena.find(path)
-        // .map(|entry| {
-        //     entry.map_file(|e| {
-        //         self.entries.get(*e).unwrap().clone()
-        //     })
-        // })
     }
 
     #[instrument]
@@ -321,32 +307,28 @@ impl FilesystemMT for OrganizeFS {
             }
         } else {
             let store = self.store.read().unwrap();
-            if let Some(entry) = store.find(path) {
-            if entry.is_directory() {
-                match libc_wrapper::lstat(&self.root) {
-                    Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                }
-            } else {
-                entry.inner()
-                .map_or_else(|| Err(libc::ENOENT), |e| {
-                    let entry = store.entries.get(e).unwrap();
-                    match libc_wrapper::lstat(&entry.host_path) {
-                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            store.find(path).map_or_else(
+                || Err(libc::ENOENT),
+                |e| {
+                    if e.is_directory() {
+                        match libc_wrapper::lstat(&self.root) {
+                            Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                            Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                        }
+                    } else {
+                        e.inner().map_or_else(
+                            || Err(libc::ENOENT),
+                            |e| {
+                                let entry = store.entries.get(e).unwrap();
+                                match libc_wrapper::lstat(&entry.host_path) {
+                                    Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                                }
+                            },
+                        )
                     }
-                })
-                // match entry.inner() {
-                //     Some(entry) => match libc_wrapper::lstat(&entry.host_path) {
-                //         Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                //         Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                //     },
-                //     None => Err(libc::ENOENT),
-                // }
-            }
-            } else {
-                Err(libc::ENOENT)
-            }
+                },
+            )
         }
     }
 
@@ -437,16 +419,16 @@ impl FilesystemMT for OrganizeFS {
             flags
         );
         let store = self.store.read().unwrap();
-        match store.find_file(path) {
-            Some(e) => {
+        store.find_file(path).map_or_else(
+            || Err(libc::ENOENT),
+            |e| {
                 let entry = store.entries.get(e).unwrap();
                 match libc_wrapper::open(&entry.host_path, flags.try_into().unwrap()) {
-                Ok(fh) => Ok((fh as u64, flags)),
-                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-            }
+                    Ok(fh) => Ok((fh as u64, flags)),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                }
             },
-            None => Err(libc::ENOENT),
-        }
+        )
     }
 
     fn read(
@@ -526,19 +508,18 @@ impl FilesystemMT for OrganizeFS {
         path.push(name);
 
         let mut store = self.store.write().unwrap();
-
-        match store.find_file(&path) {
-            Some(e) => {
+        store.find_file(&path).map_or_else(
+            || Err(libc::ENOENT),
+            |e| {
                 let entry = store.entries.get(e).unwrap().to_owned();
                 match libc_wrapper::unlink(&entry.host_path) {
-                Ok(_) => {
-                    store.remove_entry(&entry);
-                    Ok(())
+                    Ok(_) => {
+                        store.remove_entry(&entry);
+                        Ok(())
+                    }
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
-                Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-            }
             },
-            None => Err(libc::ENOENT),
-        }
+        )
     }
 }
