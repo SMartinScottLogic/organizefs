@@ -86,6 +86,25 @@ where
     }
 }
 
+impl<T> FoundEntry<T> {
+    pub fn map_file<F, U>(&self, mapper: F) -> FoundEntry<U>
+    where
+        F: Fn(&T) -> U,
+        U: Debug + PartialEq + Clone,
+    {
+        let entry = match &self.entry {
+            Entry::Root => Entry::Root,
+            Entry::Directory(d) => Entry::Directory(d.clone()),
+            Entry::File(f, t) => Entry::File(f.clone(), mapper(t)),
+            Entry::None => Entry::None,
+        };
+        FoundEntry {
+            node_id: self.node_id,
+            entry,
+        }
+    }
+}
+
 pub struct Children<'a, T> {
     arena: &'a Arena<T>,
     node: Option<NodeId>,
