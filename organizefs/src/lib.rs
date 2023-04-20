@@ -543,13 +543,7 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
-    #[test]
-    #[traced_test]
-    fn test_add() {
-        assert_eq!((1 + 2), 3);
-    }
-
-    // TODO Add tests for filesystem functionality (how to mock out libc_wrapper? Convert to trait, with functional and non-impl?)
+    #[instrument(ret,skip(libc_wrapper))]
     fn new_test_fs(libc_wrapper: impl LibcWrapper + Send + Sync + 'static) -> OrganizeFS {
         let root = PathBuf::from("/");
         let pattern = PathBuf::from("/");
@@ -558,6 +552,63 @@ mod tests {
         OrganizeFS {root, store, libc_wrapper}
     }
 
+    // open tests
+    #[test]
+    #[traced_test]
+    fn open_missing() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("missing");
+        let r = fs.open(req, &parent.join(name), 0);
+        assert_eq!(r.err(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    #[traced_test]
+    fn open_present() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_open().returning(|_, _| Ok(1));
+            libc_wrapper
+        };
+        let fs = new_test_fs(libc_wrapper);
+        {
+        let mut store = fs.store.write().unwrap();
+        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
+        store.add_entry(entry);
+        }
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("present");
+        let r = fs.open(req, &parent.join(name), 0);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    #[traced_test]
+    fn open_no_access() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_open().returning(|_, _| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+        let fs = new_test_fs(libc_wrapper);
+        {
+        let mut store = fs.store.write().unwrap();
+        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
+        store.add_entry(entry);
+        }
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("present");
+        let r = fs.open(req, &parent.join(name), 0);
+        assert_eq!(r.err(), Some(libc::EACCES));
+    }
+
+    // unlink tests
     #[test]
     #[traced_test]
     fn unlink_missing() {
