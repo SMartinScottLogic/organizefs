@@ -17,7 +17,7 @@ use humansize::FormatSize;
 use itertools::Itertools;
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
-
+use libc_wrapper::{LibcWrapper, LibcWrapperReal};
 mod libc_wrapper;
 
 #[derive(Default)]
@@ -169,10 +169,18 @@ impl OrganizeFSStore {
     }
 }
 
-#[derive(Debug, Default)]
 pub struct OrganizeFS {
     root: PathBuf,
     store: Arc<RwLock<OrganizeFSStore>>,
+    libc_wrapper: Box<dyn LibcWrapper + Send + Sync>,
+}
+impl Debug for OrganizeFS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrganizeFS")
+        .field("root", &self.root)
+        .field("store", &self.store)
+        .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -205,7 +213,7 @@ impl OrganizeFS {
             info!(store = debug(&store), "store populated");
         }
 
-        Self { root, store }
+        Self { root, store, libc_wrapper: Box::new(LibcWrapperReal::new()) }
     }
 
     #[instrument]
@@ -301,7 +309,7 @@ impl FilesystemMT for OrganizeFS {
     fn getattr(&self, req: RequestInfo, path: &Path, fh: Option<u64>) -> ResultEntry {
         info!(req = debug(req), path = debug(path), fh, "getattr");
         if let Some(fh) = fh {
-            match libc_wrapper::fstat(fh) {
+            match self.libc_wrapper.fstat(fh) {
                 Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
@@ -311,7 +319,7 @@ impl FilesystemMT for OrganizeFS {
                 || Err(libc::ENOENT),
                 |e| {
                     if e.is_directory() {
-                        match libc_wrapper::lstat(&self.root) {
+                        match self.libc_wrapper.lstat(self.root.to_owned()) {
                             Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                         }
@@ -320,7 +328,7 @@ impl FilesystemMT for OrganizeFS {
                             || Err(libc::ENOENT),
                             |e| {
                                 let entry = store.entries.get(e).unwrap();
-                                match libc_wrapper::lstat(&entry.host_path) {
+                                match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
                                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                                 }
@@ -334,7 +342,7 @@ impl FilesystemMT for OrganizeFS {
 
     fn statfs(&self, req: RequestInfo, path: &Path) -> ResultStatfs {
         debug!(req = debug(req), path = debug(path), "statfs");
-        match libc_wrapper::statfs(&self.root) {
+        match self.libc_wrapper.statfs(self.root.to_owned()) {
             Ok(stat) => Ok(Self::statfs_to_fuse(stat)),
             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
         }
@@ -423,7 +431,7 @@ impl FilesystemMT for OrganizeFS {
             || Err(libc::ENOENT),
             |e| {
                 let entry = store.entries.get(e).unwrap();
-                match libc_wrapper::open(&entry.host_path, flags.try_into().unwrap()) {
+                match self.libc_wrapper.open(entry.host_path.to_owned(), flags.try_into().unwrap()) {
                     Ok(fh) => Ok((fh as u64, flags)),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
@@ -449,7 +457,7 @@ impl FilesystemMT for OrganizeFS {
             "read"
         );
         if fh > 0 {
-            match libc_wrapper::read(fh.try_into().unwrap(), offset.try_into().unwrap(), size) {
+            match self.libc_wrapper.read(fh.try_into().unwrap(), offset.try_into().unwrap(), size) {
                 Ok(content) => callback(Ok(content.as_slice())),
                 Err(e) => callback(Err(e.raw_os_error().unwrap_or(libc::ENOENT))),
             }
@@ -488,7 +496,7 @@ impl FilesystemMT for OrganizeFS {
             flags
         );
         if fh > 0 {
-            match libc_wrapper::close(fh.try_into().unwrap()) {
+            match self.libc_wrapper.close(fh.try_into().unwrap()) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
@@ -512,7 +520,7 @@ impl FilesystemMT for OrganizeFS {
             || Err(libc::ENOENT),
             |e| {
                 let entry = store.entries.get(e).unwrap().to_owned();
-                match libc_wrapper::unlink(&entry.host_path) {
+                match self.libc_wrapper.unlink(entry.host_path.to_owned()) {
                     Ok(_) => {
                         store.remove_entry(&entry);
                         Ok(())
@@ -521,5 +529,87 @@ impl FilesystemMT for OrganizeFS {
                 }
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use tracing_test::traced_test;
+
+    use libc_wrapper::MockLibcWrapper;
+
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+
+    #[test]
+    #[traced_test]
+    fn test_add() {
+        assert_eq!((1 + 2), 3);
+    }
+
+    // TODO Add tests for filesystem functionality (how to mock out libc_wrapper? Convert to trait, with functional and non-impl?)
+    fn new_test_fs(libc_wrapper: impl LibcWrapper + Send + Sync + 'static) -> OrganizeFS {
+        let root = PathBuf::from("/");
+        let pattern = PathBuf::from("/");
+        let store = Arc::new(RwLock::new(OrganizeFSStore::new(pattern)));
+        let libc_wrapper = Box::new(libc_wrapper);
+        OrganizeFS {root, store, libc_wrapper}
+    }
+
+    #[test]
+    #[traced_test]
+    fn unlink_missing() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("missing");
+        let r = fs.unlink(req, &parent, &name);
+        assert_eq!(r.err(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    #[traced_test]
+    fn unlink_present() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_unlink().returning(|_| Ok(()));
+            libc_wrapper
+        };
+        let fs = new_test_fs(libc_wrapper);
+        {
+        let mut store = fs.store.write().unwrap();
+        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
+        store.add_entry(entry);
+        }
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("present");
+        let r = fs.unlink(req, &parent, &name);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    #[traced_test]
+    fn unlink_no_access() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_unlink().returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+        let fs = new_test_fs(libc_wrapper);
+        {
+        let mut store = fs.store.write().unwrap();
+        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
+        store.add_entry(entry);
+        }
+        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("present");
+        let r = fs.unlink(req, &parent, &name);
+        assert_eq!(r.err(), Some(libc::EACCES));
     }
 }
