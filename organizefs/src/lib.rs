@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use arena::{Arena, FoundEntry};
+use arena::{Arena, Entry, NewArena};
 use common::{expand, File, Normalize};
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
@@ -15,14 +15,13 @@ use fuse_mt::{
 };
 use humansize::FormatSize;
 use itertools::Itertools;
+use libc_wrapper::{LibcWrapper, LibcWrapperReal};
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
-use libc_wrapper::{LibcWrapper, LibcWrapperReal};
 mod libc_wrapper;
 
-#[derive(Default)]
 pub struct OrganizeFSStore {
-    arena: Arena<usize>,
+    arena: Box<dyn Arena<usize>>,
     entries: Vec<OrganizeFSEntry>,
     pattern: PathBuf,
 }
@@ -35,12 +34,12 @@ impl OrganizeFSStore {
         let pattern = PathBuf::from(pattern).normalize();
         if pattern != self.pattern {
             // Re-patterning of filesystem
-            let mut arena = Arena::<usize>::default();
+            let mut arena = NewArena::<usize>::default();
             for (id, entry) in self.entries.iter().enumerate() {
                 let local_path = entry.local_path(&pattern);
                 Self::add_entry_to_arena(&mut arena, &local_path, id);
             }
-            self.arena = arena;
+            self.arena = Box::new(arena);
             self.pattern = pattern;
         }
     }
@@ -116,8 +115,8 @@ impl Display for OrganizeFSEntry {
 impl Debug for OrganizeFSStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
-            .field("arena", &self.arena)
-            .field("entries", &self.entries)
+            .field("arena_len", &self.arena.len())
+            .field("entries_len", &self.entries.len())
             .field("pattern", &self.pattern)
             .finish()
     }
@@ -127,7 +126,8 @@ impl OrganizeFSStore {
     pub fn new(pattern: PathBuf) -> Self {
         Self {
             pattern: pattern.normalize(),
-            ..Default::default()
+            arena: Box::<NewArena<usize>>::default(),
+            entries: Vec::new(),
         }
     }
     #[instrument]
@@ -141,31 +141,43 @@ impl OrganizeFSStore {
         self.entries.push(entry.clone());
 
         let local_path = entry.local_path(&self.pattern);
-
-        Self::add_entry_to_arena(&mut self.arena, &local_path, id);
+        Self::add_entry_to_arena(self.arena.as_mut(), &local_path, id);
     }
 
     #[instrument]
-    fn add_entry_to_arena(arena: &mut arena::Arena<usize>, local_path: &Path, id: usize) {
-        info!(id = debug(&id), path = debug(&local_path), "add to arena");
+    fn add_entry_to_arena(arena: &mut dyn arena::Arena<usize>, local_path: &Path, id: usize) {
+        debug!(
+            arena = debug(&arena),
+            id = debug(&id),
+            path = debug(&local_path),
+            "add to arena"
+        );
         arena.add_file(local_path, id).unwrap();
     }
 
     #[instrument]
-    fn find(&self, path: &Path) -> Option<FoundEntry<usize>> {
+    fn find(&self, path: &Path) -> Entry<usize> {
         self.arena.find(path)
     }
 
     #[instrument]
     fn find_file(&self, path: &Path) -> Option<usize> {
-        self.find(path)
-            .filter(|e| e.is_file())
-            .and_then(|entry| entry.inner())
+        match self.find(path) {
+            Entry::Root | Entry::Directory(_) | Entry::None => None,
+            Entry::File(_p, index) => Some(index),
+        }
+        // self.find(path)
+        //     .filter(|e| e.is_file())
+        //     .and_then(|entry| entry.inner())
     }
 
     #[instrument(ret)]
-    fn find_dir(&self, path: &Path) -> Option<FoundEntry<usize>> {
-        self.find(path).filter(|e| e.is_directory())
+    fn find_dir(&self, path: &Path) -> Option<Entry<usize>> {
+        match self.find(path) {
+            Entry::File(_, _) => None,
+            e => Some(e),
+        }
+        //self.find(path).filter(|e| e.is_directory())
     }
 }
 
@@ -177,9 +189,9 @@ pub struct OrganizeFS {
 impl Debug for OrganizeFS {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrganizeFS")
-        .field("root", &self.root)
-        .field("store", &self.store)
-        .finish()
+            .field("root", &self.root)
+            .field("store", &self.store)
+            .finish()
     }
 }
 
@@ -213,7 +225,11 @@ impl OrganizeFS {
             info!(store = debug(&store), "store populated");
         }
 
-        Self { root, store, libc_wrapper: Box::new(LibcWrapperReal::new()) }
+        Self {
+            root,
+            store,
+            libc_wrapper: Box::new(LibcWrapperReal::new()),
+        }
     }
 
     #[instrument]
@@ -315,28 +331,22 @@ impl FilesystemMT for OrganizeFS {
             }
         } else {
             let store = self.store.read().unwrap();
-            store.find(path).map_or_else(
-                || Err(libc::ENOENT),
-                |e| {
-                    if e.is_directory() {
-                        match self.libc_wrapper.lstat(self.root.to_owned()) {
-                            Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                            Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                        }
-                    } else {
-                        e.inner().map_or_else(
-                            || Err(libc::ENOENT),
-                            |e| {
-                                let entry = store.entries.get(e).unwrap();
-                                match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
-                                    Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                                }
-                            },
-                        )
+            match store.find(path) {
+                Entry::Root | Entry::Directory(_) => {
+                    match self.libc_wrapper.lstat(self.root.to_owned()) {
+                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                     }
-                },
-            )
+                }
+                Entry::File(_p, e) => {
+                    let entry = store.entries.get(e).unwrap();
+                    match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
+                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                    }
+                }
+                Entry::None => Err(libc::ENOENT),
+            }
         }
     }
 
@@ -371,13 +381,13 @@ impl FilesystemMT for OrganizeFS {
         let children = store
             .find_dir(path)
             .unwrap()
-            .children(&store.arena)
+            .children(store.arena.as_ref())
             .unique()
             .filter_map(|entry| {
                 info!(path = debug(&path), entry = debug(&entry), "child");
                 match entry {
-                    arena::Entry::Directory(name) => Some((FileType::Directory, name.to_owned())),
-                    arena::Entry::File(name, _) => Some((FileType::RegularFile, name.to_owned())),
+                    arena::Entry::Directory(name) => Some((FileType::Directory, name)),
+                    arena::Entry::File(name, _) => Some((FileType::RegularFile, name)),
                     _ => None,
                 }
             })
@@ -431,7 +441,10 @@ impl FilesystemMT for OrganizeFS {
             || Err(libc::ENOENT),
             |e| {
                 let entry = store.entries.get(e).unwrap();
-                match self.libc_wrapper.open(entry.host_path.to_owned(), flags.try_into().unwrap()) {
+                match self
+                    .libc_wrapper
+                    .open(entry.host_path.to_owned(), flags.try_into().unwrap())
+                {
                     Ok(fh) => Ok((fh as u64, flags)),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
@@ -457,7 +470,10 @@ impl FilesystemMT for OrganizeFS {
             "read"
         );
         if fh > 0 {
-            match self.libc_wrapper.read(fh.try_into().unwrap(), offset.try_into().unwrap(), size) {
+            match self
+                .libc_wrapper
+                .read(fh.try_into().unwrap(), offset.try_into().unwrap(), size)
+            {
                 Ok(content) => callback(Ok(content.as_slice())),
                 Err(e) => callback(Err(e.raw_os_error().unwrap_or(libc::ENOENT))),
             }
@@ -543,13 +559,17 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
-    #[instrument(ret,skip(libc_wrapper))]
+    #[instrument(ret, skip(libc_wrapper))]
     fn new_test_fs(libc_wrapper: impl LibcWrapper + Send + Sync + 'static) -> OrganizeFS {
         let root = PathBuf::from("/");
         let pattern = PathBuf::from("/");
         let store = Arc::new(RwLock::new(OrganizeFSStore::new(pattern)));
         let libc_wrapper = Box::new(libc_wrapper);
-        OrganizeFS {root, store, libc_wrapper}
+        OrganizeFS {
+            root,
+            store,
+            libc_wrapper,
+        }
     }
 
     // open tests
@@ -559,7 +579,12 @@ mod tests {
         let libc_wrapper = MockLibcWrapper::new();
 
         let fs = new_test_fs(libc_wrapper);
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("missing");
         let r = fs.open(req, &parent.join(name), 0);
@@ -576,11 +601,21 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-        let mut store = fs.store.write().unwrap();
-        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
-        store.add_entry(entry);
+            let mut store = fs.store.write().unwrap();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+            };
+            store.add_entry(entry);
         }
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("present");
         let r = fs.open(req, &parent.join(name), 0);
@@ -592,16 +627,28 @@ mod tests {
     fn open_no_access() {
         let libc_wrapper = {
             let mut libc_wrapper = MockLibcWrapper::new();
-            libc_wrapper.expect_open().returning(|_, _| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+                .expect_open()
+                .returning(|_, _| Err(io::Error::from_raw_os_error(libc::EACCES)));
             libc_wrapper
         };
         let fs = new_test_fs(libc_wrapper);
         {
-        let mut store = fs.store.write().unwrap();
-        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
-        store.add_entry(entry);
+            let mut store = fs.store.write().unwrap();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+            };
+            store.add_entry(entry);
         }
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("present");
         let r = fs.open(req, &parent.join(name), 0);
@@ -615,7 +662,12 @@ mod tests {
         let libc_wrapper = MockLibcWrapper::new();
 
         let fs = new_test_fs(libc_wrapper);
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("missing");
         let r = fs.unlink(req, &parent, &name);
@@ -632,11 +684,21 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-        let mut store = fs.store.write().unwrap();
-        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
-        store.add_entry(entry);
+            let mut store = fs.store.write().unwrap();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+            };
+            store.add_entry(entry);
         }
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("present");
         let r = fs.unlink(req, &parent, &name);
@@ -648,16 +710,28 @@ mod tests {
     fn unlink_no_access() {
         let libc_wrapper = {
             let mut libc_wrapper = MockLibcWrapper::new();
-            libc_wrapper.expect_unlink().returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+                .expect_unlink()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
             libc_wrapper
         };
         let fs = new_test_fs(libc_wrapper);
         {
-        let mut store = fs.store.write().unwrap();
-        let entry = OrganizeFSEntry { name: "present".into(), host_path: "".into(), size: "0 B".into(), mime: "text_plain".into() };
-        store.add_entry(entry);
+            let mut store = fs.store.write().unwrap();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+            };
+            store.add_entry(entry);
         }
-        let req: RequestInfo = RequestInfo {unique: 0, pid: 0, gid: 0, uid: 0};
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
         let parent = PathBuf::from("/");
         let name = std::ffi::OsString::from("present");
         let r = fs.unlink(req, &parent, &name);
