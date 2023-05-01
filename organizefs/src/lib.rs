@@ -14,14 +14,13 @@ use fuse_mt::{
     ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
 };
 use humansize::FormatSize;
-use itertools::Itertools;
 use libc_wrapper::{LibcWrapper, LibcWrapperReal};
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 mod libc_wrapper;
 
 pub struct OrganizeFSStore {
-    arena: Box<dyn Arena<usize>>,
+    arena: NewArena<usize>,
     entries: Vec<OrganizeFSEntry>,
     pattern: PathBuf,
 }
@@ -39,7 +38,7 @@ impl OrganizeFSStore {
                 let local_path = entry.local_path(&pattern);
                 Self::add_entry_to_arena(&mut arena, &local_path, id);
             }
-            self.arena = Box::new(arena);
+            self.arena = arena;
             self.pattern = pattern;
         }
     }
@@ -121,12 +120,13 @@ impl Debug for OrganizeFSStore {
             .finish()
     }
 }
+type ArenaEntry = <arena::NewArena<usize> as arena::Arena<usize>>::Entry;
 impl OrganizeFSStore {
     #[instrument]
     pub fn new(pattern: PathBuf) -> Self {
         Self {
             pattern: pattern.normalize(),
-            arena: Box::<NewArena<usize>>::default(),
+            arena: NewArena::<usize>::default(),
             entries: Vec::new(),
         }
     }
@@ -141,11 +141,11 @@ impl OrganizeFSStore {
         self.entries.push(entry.clone());
 
         let local_path = entry.local_path(&self.pattern);
-        Self::add_entry_to_arena(self.arena.as_mut(), &local_path, id);
+        Self::add_entry_to_arena(&mut self.arena, &local_path, id);
     }
 
     #[instrument]
-    fn add_entry_to_arena(arena: &mut dyn arena::Arena<usize>, local_path: &Path, id: usize) {
+    fn add_entry_to_arena(arena: &mut NewArena<usize>, local_path: &Path, id: usize) {
         debug!(
             arena = debug(&arena),
             id = debug(&id),
@@ -156,28 +156,28 @@ impl OrganizeFSStore {
     }
 
     #[instrument]
-    fn find(&self, path: &Path) -> Entry<usize> {
+    fn find(&self, path: &Path) -> ArenaEntry {
         self.arena.find(path)
     }
 
     #[instrument]
     fn find_file(&self, path: &Path) -> Option<usize> {
-        match self.find(path) {
-            Entry::Root | Entry::Directory(_) | Entry::None => None,
-            Entry::File(_p, index) => Some(index),
-        }
-        // self.find(path)
-        //     .filter(|e| e.is_file())
-        //     .and_then(|entry| entry.inner())
+        // match self.find(path) {
+        //     Entry::Root | Entry::Directory(_) | Entry::None => None,
+        //     Entry::File(_p, index) => Some(index),
+        // }
+        self.find(path)
+            .filter(|e| e.is_file())
+            .and_then(|entry| entry.inner())
     }
 
     #[instrument(ret)]
-    fn find_dir(&self, path: &Path) -> Option<Entry<usize>> {
-        match self.find(path) {
-            Entry::File(_, _) => None,
-            e => Some(e),
-        }
-        //self.find(path).filter(|e| e.is_directory())
+    fn find_dir(&self, path: &Path) -> Option<ArenaEntry> {
+        // match self.find(path) {
+        //     Entry::File(_, _) => None,
+        //     e => Some(e),
+        // }
+        self.find(path).filter(|e| e.is_directory()).cloned()
     }
 }
 
@@ -331,22 +331,38 @@ impl FilesystemMT for OrganizeFS {
             }
         } else {
             let store = self.store.read().unwrap();
-            match store.find(path) {
-                Entry::Root | Entry::Directory(_) => {
-                    match self.libc_wrapper.lstat(self.root.to_owned()) {
-                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                    }
+            let r = store.find(path);
+            info!(found = debug(&r), "found");
+            if r.is_directory() {
+                match self.libc_wrapper.lstat(self.root.to_owned()) {
+                    Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
-                Entry::File(_p, e) => {
-                    let entry = store.entries.get(e).unwrap();
-                    match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
-                        Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
-                        Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                    }
+            } else if r.is_file() {
+                let entry = store.entries.get(r.inner().unwrap()).unwrap();
+                match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
+                    Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
-                Entry::None => Err(libc::ENOENT),
+            } else {
+                Err(libc::ENOENT)
             }
+            // match store.find(path) {
+            //     Entry::Root | Entry::Directory(_) => {
+            //         match self.libc_wrapper.lstat(self.root.to_owned()) {
+            //             Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+            //             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            //         }
+            //     }
+            //     Entry::File(_p, e) => {
+            //         let entry = store.entries.get(e).unwrap();
+            //         match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
+            //             Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
+            //             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+            //         }
+            //     }
+            //     Entry::None => Err(libc::ENOENT),
+            // }
         }
     }
 
@@ -381,15 +397,28 @@ impl FilesystemMT for OrganizeFS {
         let children = store
             .find_dir(path)
             .unwrap()
-            .children(store.arena.as_ref())
-            .unique()
-            .filter_map(|entry| {
-                info!(path = debug(&path), entry = debug(&entry), "child");
-                match entry {
-                    arena::Entry::Directory(name) => Some((FileType::Directory, name)),
-                    arena::Entry::File(name, _) => Some((FileType::RegularFile, name)),
-                    _ => None,
+            .children(&store.arena)
+            //.unique()
+            .filter_map(|(name, entry)| {
+                //let entry = store.entries.get(id).unwrap();
+                info!(
+                    path = debug(&path),
+                    name = debug(&name),
+                    entry = debug(&entry),
+                    "child"
+                );
+                if entry.is_directory() {
+                    Some((FileType::Directory, name))
+                } else if entry.is_file() {
+                    Some((FileType::RegularFile, name))
+                } else {
+                    None
                 }
+                // match entry {
+                //     arena::Entry::Directory(name) => Some((FileType::Directory, name)),
+                //     arena::Entry::File(name, _) => Some((FileType::RegularFile, name)),
+                //     _ => None,
+                // }
             })
             .fold(
                 vec![
@@ -403,7 +432,10 @@ impl FilesystemMT for OrganizeFS {
                     },
                 ],
                 |mut acc, (kind, name)| {
-                    acc.push(DirectoryEntry { name, kind });
+                    acc.push(DirectoryEntry {
+                        name: name.clone(),
+                        kind,
+                    });
                     acc
                 },
             );

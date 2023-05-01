@@ -20,15 +20,10 @@ type AxumState = State<Arc<RwLock<OrganizeFSStore>>>;
 #[tokio::main]
 async fn main() {
     // install global collector configured based on RUST_LOG env var.
-    let level = match env::var("RUST_LOG") {
-        Ok(v) => match Level::from_str(&v) {
-            Ok(l) => l,
-            Err(_) => Level::INFO,
-        },
-        Err(_) => Level::INFO,
-    };
+    let level =
+        env::var("RUST_LOG").map_or(Level::INFO, |v| Level::from_str(&v).unwrap_or(Level::INFO));
     tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NONE)
+        .with_span_events(FmtSpan::ACTIVE)
         .with_thread_ids(true)
         .with_thread_names(true)
         .with_file(true)

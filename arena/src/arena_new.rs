@@ -7,9 +7,11 @@ use std::{
 
 use tracing::{debug, error, info, instrument};
 
-use crate::arena_types::{Arena, Entry};
+use crate::{
+    arena_types::{Arena, Entry},
+    ArenaError,
+};
 
-#[derive(Debug)]
 pub struct NewArena<T> {
     data: HashMap<usize, NewArenaElement<T>>,
 }
@@ -20,10 +22,19 @@ impl<T> Default for NewArena<T> {
         Self { data }
     }
 }
+impl<T> Debug for NewArena<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewArena")
+            .field("data_len", &self.data.len())
+            .finish()
+    }
+}
 impl<T> Arena<T> for NewArena<T>
 where
     T: Clone + Debug + Send + Sync,
 {
+    type Entry = NewArenaElement<T>;
+
     #[instrument]
     fn len(&self) -> usize {
         self.data.len()
@@ -34,17 +45,18 @@ where
         self.data.is_empty()
     }
 
-    fn add_file(&mut self, file: &Path, entry: T) -> Result<(), ()> {
-        info!(
+    fn add_file(&mut self, file: &Path, entry: T) -> Result<(), ArenaError> {
+        info!(file = debug(file), entry = debug(&entry), "add_file");
+        debug!(
             file = debug(file),
             entry = debug(&entry),
-            data = debug(&self.data),
+            arena = debug(&self),
             "add_file"
         );
 
         let mut parent_id = 0_usize;
         for component in file.parent().unwrap().components() {
-            info!(component = debug(component), "find parent");
+            debug!(component = debug(component), "find parent");
             parent_id = match component {
                 std::path::Component::RootDir => 0_usize,
                 std::path::Component::Normal(component_name) => {
@@ -66,12 +78,13 @@ where
     }
 
     #[instrument]
-    fn find(&self, path: &Path) -> Entry<T> {
-        info!(path = debug(path), data = debug(&self.data), "find");
+    fn find(&self, path: &Path) -> Self::Entry {
+        info!(path = debug(path), "find");
+        debug!(path = debug(path), data = debug(&self.data), "find");
 
         let mut found = self.data.get(&0).unwrap();
         for component in path.components() {
-            info!(component = debug(component), "find parent");
+            debug!(component = debug(component), "find parent");
             found = match component {
                 std::path::Component::RootDir => self.data.get(&0).unwrap(),
                 std::path::Component::Normal(p) => {
@@ -79,10 +92,10 @@ where
                     match found.children() {
                         Some(children) => {
                             let f = match children.get(p) {
-                                None => return Entry::None,
+                                None => return Self::Entry::None,
                                 Some(c) => self.data.get(c).unwrap(),
                             };
-                            info!(
+                            debug!(
                                 parent = debug(found),
                                 needle = debug(p),
                                 found = debug(f),
@@ -92,22 +105,22 @@ where
                         }
                         _ => {
                             error!("{:?} has no children, expected at least {:?}", found, p);
-                            return Entry::None;
+                            return Self::Entry::None;
                         }
                     }
                 }
                 _ => unreachable!(),
             }
         }
-        info!(found = debug(found), "find");
-        if let Some(file_name) = path.file_name() {
-            match found {
-                NewArenaElement::Root(_) => Entry::<T>::Root,
-                NewArenaElement::Leaf(id) => Entry::File(file_name.into(), (*id).to_owned()),
-                NewArenaElement::Branch(_) => Entry::Directory(file_name.into()),
-            }
-        } else {
-            Entry::None
+        debug!(
+            seek = debug(path.components().last()),
+            found = debug(found),
+            "find"
+        );
+        match path.components().last() {
+            Some(std::path::Component::RootDir) if found.is_root() => found.clone(),
+            Some(std::path::Component::Normal(_)) => found.clone(),
+            _ => Self::Entry::None,
         }
     }
 }
@@ -118,12 +131,12 @@ impl<T: Debug> NewArena<T> {
         parent_id: usize,
         name: &OsStr,
         element: NewArenaElement<T>,
-    ) -> Result<usize, ()> {
-        info!("upsert {name:?}=>{element:?} in children of {parent_id}");
-        let branch_id = 1 + self.data.keys().max().unwrap_or(&0);
+    ) -> Result<usize, ArenaError> {
+        debug!("upsert {name:?}=>{element:?} in children of {parent_id}");
+        let branch_id = 1 + self.data.len();
 
         let children = match self.data.get_mut(&parent_id).and_then(|p| p.children_mut()) {
-            None => return Err(()),
+            None => return Err(ArenaError::Unknown),
             Some(c) => c,
         };
 
@@ -141,19 +154,31 @@ impl<T: Debug> NewArena<T> {
     }
 }
 
-#[derive(Debug)]
-enum NewArenaElement<T> {
+#[derive(Clone)]
+pub enum NewArenaElement<T> {
     Root(HashMap<OsString, usize>),
     Leaf(T),
     Branch(HashMap<OsString, usize>),
+    None,
 }
 
 impl<T> NewArenaElement<T> {
+    pub fn inner(&self) -> Option<T>
+    where
+        T: Copy,
+    {
+        match self {
+            Self::Leaf(l) => Some(*l),
+            _ => None,
+        }
+    }
+
     fn children(&self) -> Option<&HashMap<std::ffi::OsString, usize>> {
         match self {
             NewArenaElement::Root(c) => Some(c),
             NewArenaElement::Leaf(_) => None,
             NewArenaElement::Branch(c) => Some(c),
+            NewArenaElement::None => None,
         }
     }
 
@@ -162,7 +187,72 @@ impl<T> NewArenaElement<T> {
             NewArenaElement::Root(c) => Some(c),
             NewArenaElement::Leaf(_) => None,
             NewArenaElement::Branch(c) => Some(c),
+            NewArenaElement::None => None,
         }
+    }
+}
+impl<T> Entry for NewArenaElement<T> {
+    type Children<'a> = Children<'a, T> where Self: 'a;
+    type Arena = NewArena<T>;
+
+    fn is_root(&self) -> bool {
+        matches!(&self, Self::Root(_))
+    }
+
+    fn is_directory(&self) -> bool {
+        matches!(&self, Self::Root(_) | Self::Branch(_))
+    }
+
+    fn is_file(&self) -> bool {
+        matches!(&self, Self::Leaf(_))
+    }
+
+    fn children<'a, 'b>(&'a self, arena: &'b Self::Arena) -> Self::Children<'b>
+    where
+        'a: 'b,
+    {
+        let r = match self {
+            NewArenaElement::Root(c) => Some(c),
+            NewArenaElement::Leaf(_) => None,
+            NewArenaElement::Branch(c) => Some(c),
+            NewArenaElement::None => None,
+        };
+        Children::from(arena, r)
+    }
+}
+impl<T> Debug for NewArenaElement<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root(_) => write!(f, "Root"),
+            Self::Leaf(_) => write!(f, "Leaf"),
+            Self::Branch(_) => write!(f, "Branch"),
+            Self::None => write!(f, "None"),
+        }
+    }
+}
+pub struct Children<'a, T> {
+    arena: &'a NewArena<T>,
+    children: Option<std::collections::hash_map::Iter<'a, OsString, usize>>,
+}
+impl<'a, T> Children<'a, T> {
+    fn from(arena: &'a NewArena<T>, value: Option<&'a HashMap<OsString, usize>>) -> Self {
+        Self {
+            arena,
+            children: value.map(|c| c.iter()),
+        }
+    }
+}
+impl<'a, T> Iterator for Children<'a, T> {
+    type Item = (&'a OsString, &'a NewArenaElement<T>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.children.as_mut().and_then(|iter| {
+            if let Some((name, idx)) = iter.next() {
+                self.arena.data.get(idx).map(|v| (name, v))
+            } else {
+                None
+            }
+        })
     }
 }
 
