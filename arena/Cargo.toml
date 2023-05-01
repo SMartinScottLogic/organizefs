@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 tracing = { workspace = true }
 tracing-test = { workspace = true }
-indextree-ng = { version = "1.0.5" }
+indextree-ng = { version = "1.0" }
 
 [dependencies.common]
 path="../common"
