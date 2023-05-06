@@ -15,7 +15,7 @@ pub trait LibcWrapper {
     fn unlink(&self, path: PathBuf) -> io::Result<()>;
 }
 
-pub struct LibcWrapperReal {}
+pub struct LibcWrapperReal;
 impl LibcWrapperReal {
     pub fn new() -> Self {
         Self {}

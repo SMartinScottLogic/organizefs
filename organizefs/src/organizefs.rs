@@ -1,12 +1,25 @@
-use std::{ffi::OsString, path::{PathBuf, Path}, sync::{RwLock, Arc, Mutex}, fs, fmt::Display, time::{SystemTime, Duration}};
-use std::fmt::Debug;
-use fuse_mt::{Statfs, FileAttr, FilesystemMT, RequestInfo, ResultEmpty, FileType, ResultEntry, ResultStatfs, ResultOpen, DirectoryEntry, ResultReaddir, CallbackResult, ResultSlice};
+use fuse_mt::{
+    CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
+    ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
+};
 use humansize::FormatSize;
-use tracing::{instrument, debug, info};
+use std::fmt::Debug;
+use std::{
+    ffi::OsString,
+    fmt::Display,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, SystemTime},
+};
+use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
-use crate::{libc_wrapper::{LibcWrapper, LibcWrapperReal}, arena::{NewArena, Arena, Entry}};
-use crate::common::{File, expand, Normalize};
+use crate::{
+    common::{expand, File, Normalize},
+    arena::{Arena, Entry, NewArena},
+    libc_wrapper::{LibcWrapper, LibcWrapperReal},
+};
 
 lazy_static::lazy_static! {
     static ref FORMAT: humansize::FormatSizeOptions = humansize::DECIMAL.space_after_value(false).decimal_zeroes(2);
@@ -186,7 +199,11 @@ impl Debug for OrganizeFS {
 
 impl OrganizeFS {
     #[instrument]
-    pub fn new(root: &str, store: Arc<RwLock<OrganizeFSStore>>, shutdown_signal: tokio::sync::oneshot::Sender<()>) -> Self {
+    pub fn new(
+        root: &str,
+        store: Arc<RwLock<OrganizeFSStore>>,
+        shutdown_signal: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
         {
             let mut store = store.write().unwrap();
@@ -287,7 +304,7 @@ impl OrganizeFS {
 
 impl FilesystemMT for OrganizeFS {
     fn init(&self, req: RequestInfo) -> ResultEmpty {
-        info!(req=debug(req), "init");
+        info!(req = debug(req), "init");
         Ok(())
     }
 
@@ -556,7 +573,14 @@ impl FilesystemMT for OrganizeFS {
         )
     }
 
-    fn rename(&self, req: RequestInfo, parent: &Path, name: &std::ffi::OsStr, newparent: &Path, newname: &std::ffi::OsStr) -> ResultEmpty {
+    fn rename(
+        &self,
+        req: RequestInfo,
+        parent: &Path,
+        name: &std::ffi::OsStr,
+        newparent: &Path,
+        newname: &std::ffi::OsStr,
+    ) -> ResultEmpty {
         info!(
             req = debug(req),
             parent = debug(parent),
@@ -567,7 +591,6 @@ impl FilesystemMT for OrganizeFS {
         );
         Err(libc::ENOSYS)
     }
-
 }
 
 #[cfg(test)]
@@ -763,4 +786,3 @@ mod tests {
         assert_eq!(r.err(), Some(libc::EACCES));
     }
 }
-
