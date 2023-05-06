@@ -7,7 +7,7 @@ use std::{
 
 use tracing::{debug, error, info, instrument};
 
-use crate::{
+use crate::arena::{
     arena_types::{Arena, Entry},
     ArenaError,
 };

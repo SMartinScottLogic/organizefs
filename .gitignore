@@ -16,5 +16,6 @@ Cargo.lock
 # App specific
 /test_src/
 /test_tgt/
-perf.data
-/*.svg
+/perf.data
+/perf.data.old
+/flamegraph*.svg

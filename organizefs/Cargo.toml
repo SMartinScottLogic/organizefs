@@ -21,9 +21,10 @@ walkdir = "2.3"
 tree_magic_mini = "3.0"
 # A powerful mock object library for Rust.
 mockall = "0.11"
+indextree-ng = { version = "1.0" }
 
-[dependencies.common]
-path="../common"
+#[dependencies.common]
+#path="../common"
 
-[dependencies.arena]
-path="../arena"
+#[dependencies.arena]
+#path="../arena"
