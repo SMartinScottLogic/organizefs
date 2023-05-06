@@ -6,10 +6,6 @@ use std::{
 
 use tracing::{debug, instrument};
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
 pub trait Normalize {
     fn normalize(&self) -> Self;
 }

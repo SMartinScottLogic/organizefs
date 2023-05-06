@@ -40,10 +40,11 @@ async fn main() {
         // OsStr::new("auto_unmount"),
     ];
 
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let stats = Arc::new(RwLock::new(OrganizeFSStore::new(PathBuf::from(
         "/../s/../t/./{meta}/{size}",
     ))));
-    let organizefs = OrganizeFS::new(&args[1], stats.clone());
+    let organizefs = OrganizeFS::new(&args[1], stats.clone(), tx);
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 
     // Setup REST endpoints
@@ -72,6 +73,9 @@ async fn main() {
     // run it with hyper on localhost:3000
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
         .serve(app.into_make_service())
+        .with_graceful_shutdown(async {
+            rx.await.ok();
+        })
         .await
         .unwrap();
     fs.join();

@@ -1,9 +1,6 @@
 [workspace]
 members = [
-    "common"
-    , "arena"
-    , "scratch"
-    , "organizefs"
+    "organizefs"
 ]
 
 [workspace.dependencies]

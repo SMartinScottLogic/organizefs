@@ -8,7 +8,7 @@ use std::{
 use indextree_ng::NodeId;
 use tracing::{debug, error, info, instrument};
 
-use crate::{Arena, ArenaError, Entry};
+use crate::arena::{Arena, ArenaError, Entry};
 
 enum UpsertResult {
     Existing(NodeId),
@@ -331,6 +331,8 @@ mod test {
 
     use tracing_test::traced_test;
 
+    use crate::common::File;
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -338,7 +340,7 @@ mod test {
         meta: String,
         size: String,
     }
-    impl common::File for TestFile {
+    impl File for TestFile {
         fn meta(&self) -> &str {
             todo!()
         }
