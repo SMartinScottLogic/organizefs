@@ -1,5 +1,5 @@
 mod arena;
-mod common;
+pub mod common;
 mod libc_wrapper;
 mod organizefs;
 

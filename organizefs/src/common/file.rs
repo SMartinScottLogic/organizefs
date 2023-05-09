@@ -1,76 +1,28 @@
 use std::{
-    ffi::OsString,
     fmt::Debug,
-    path::{Component, Path, PathBuf},
+    ops::Index,
+    path::{Component, Path},
 };
 
 use tracing::{debug, instrument};
 
-pub trait Normalize {
-    fn normalize(&self) -> Self;
-}
-
-impl Normalize for PathBuf {
-    fn normalize(&self) -> Self {
-        let mut comps = Vec::new();
-
-        for c in self.components() {
-            match c {
-                std::path::Component::Prefix(_) => todo!(),
-                std::path::Component::RootDir => {
-                    comps.clear();
-                    comps.push(c);
-                }
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    if let Some(std::path::Component::Normal(_)) = comps.last() {
-                        comps.pop();
-                    }
-                }
-                std::path::Component::Normal(_) => comps.push(c),
-            }
-        }
-        let mut res = OsString::new();
-        let mut need_sep = false;
-
-        for c in comps {
-            if need_sep && c != std::path::Component::RootDir {
-                res.push(std::path::MAIN_SEPARATOR_STR);
-            }
-            res.push(c.as_os_str());
-
-            need_sep = match c {
-                std::path::Component::RootDir => false,
-                std::path::Component::Prefix(_) => todo!(),
-                _ => true,
-            }
-        }
-        debug!(source = debug(self), target = debug(&res), "normalize");
-        PathBuf::from(&res)
-    }
-}
-
-pub trait File {
-    fn meta(&self) -> &str;
-    fn size(&self) -> &str;
-}
+pub trait FsFile: for<'a> Index<&'a str, Output = str> {}
 
 #[instrument(level = "debug")]
 pub fn expand<T>(component: &Component, file: &T) -> String
 where
-    T: Debug + Clone + File,
+    T: Debug + Clone + FsFile,
 {
     let component = component.as_os_str().to_string_lossy();
-    let np = component
-        .replace("{meta}", file.meta())
-        .replace("{size}", file.size());
-    np
+    component
+        .replace("{meta}", &file["meta"])
+        .replace("{size}", &file["size"])
 }
 
 #[instrument(level = "debug")]
 pub fn get_child_files<T>(files: &[T], pattern: &Path, cur_path: &Path) -> Vec<T>
 where
-    T: Debug + Clone + File,
+    T: Debug + Clone + FsFile,
 {
     let matching_files = files
         .iter()
@@ -95,32 +47,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use file_proc_macro::FsFile;
+
     use super::*;
 
     #[derive(Debug, Clone)]
+    #[derive(FsFile)]
     struct TestFile<'a> {
-        meta: &'a str,
-        size: &'a str,
+        #[fsfile="meta"] meta: &'a str,
+        #[fsfile="size"] size: &'a str,
         id: usize,
-    }
-    impl<'a> File for TestFile<'a> {
-        fn meta(&self) -> &str {
-            self.meta
-        }
-
-        fn size(&self) -> &str {
-            self.size
-        }
-    }
-
-    #[test]
-    fn normalize() {
-        let input = Path::new("/../s/../t/./m_{meta}/s_{size}/{meta}_{size}").to_path_buf();
-        let result = input.normalize();
-        assert_eq!(
-            "/t/m_{meta}/s_{size}/{meta}_{size}",
-            result.to_str().unwrap()
-        );
     }
 
     #[test]
@@ -137,7 +73,7 @@ mod tests {
                 id: 1,
             },
         ];
-        let pattern = Path::new("/{meta}/{size}").to_path_buf().normalize();
+        let pattern = Path::new("/{meta}/{size}").to_path_buf();
         let cur_path = Path::new("/");
         let children = super::get_child_files(&files, &pattern, cur_path);
         assert_eq!(2, children.len());
@@ -164,7 +100,7 @@ mod tests {
                 id: 2,
             },
         ];
-        let pattern = Path::new("/{meta}").to_path_buf().normalize();
+        let pattern = Path::new("/{meta}").to_path_buf();
         let cur_path = Path::new("/1");
         let children = super::get_child_files(&files, &pattern, cur_path);
         assert_eq!(2, children.len());
@@ -196,7 +132,7 @@ mod tests {
                 id: 3,
             },
         ];
-        let pattern = Path::new("/{meta}/{size}").to_path_buf().normalize();
+        let pattern = Path::new("/{meta}/{size}").to_path_buf();
         let cur_path = Path::new("/1/2");
         let children = super::get_child_files(&files, &pattern, cur_path);
         assert_eq!(2, children.len());

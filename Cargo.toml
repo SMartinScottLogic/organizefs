@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "organizefs"
+    "file_proc_macro",
+    "file_proc_tests",
+    "organizefs",
 ]
 
 [workspace.dependencies]

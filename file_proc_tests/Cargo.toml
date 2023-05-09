@@ -1,0 +1,10 @@
+[package]
+name = "file_proc_tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.file_proc_macro]
+path="../file_proc_macro"
+
+[dependencies.organizefs]
+path="../organizefs"
