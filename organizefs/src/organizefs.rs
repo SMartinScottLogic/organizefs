@@ -1,23 +1,25 @@
+use file_proc_macro::FsFile;
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
     ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
 };
 use humansize::FormatSize;
 use std::fmt::Debug;
+use std::ops::Index;
 use std::{
     ffi::OsString,
     fmt::Display,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
 use crate::{
-    common::{expand, File, Normalize},
     arena::{Arena, Entry, NewArena},
+    common::{expand, FsFile, Normalize},
     libc_wrapper::{LibcWrapper, LibcWrapperReal},
 };
 
@@ -27,20 +29,12 @@ lazy_static::lazy_static! {
 static TTL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(FsFile)]
 struct OrganizeFSEntry {
     name: OsString,
     host_path: PathBuf,
-    size: String,
-    mime: String,
-}
-impl File for OrganizeFSEntry {
-    fn meta(&self) -> &str {
-        &self.mime
-    }
-
-    fn size(&self) -> &str {
-        &self.size
-    }
+    #[fsfile="size"] size: String,
+    #[fsfile="meta"] mime: String,
 }
 
 impl OrganizeFSEntry {
@@ -184,7 +178,7 @@ impl OrganizeFSStore {
 
 pub struct OrganizeFS {
     root: PathBuf,
-    store: Arc<RwLock<OrganizeFSStore>>,
+    store: Arc<parking_lot::RwLock<OrganizeFSStore>>,
     libc_wrapper: Box<dyn LibcWrapper + Send + Sync>,
     shutdown_signal: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
@@ -201,12 +195,12 @@ impl OrganizeFS {
     #[instrument]
     pub fn new(
         root: &str,
-        store: Arc<RwLock<OrganizeFSStore>>,
+        store: Arc<parking_lot::RwLock<OrganizeFSStore>>,
         shutdown_signal: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
         {
-            let mut store = store.write().unwrap();
+            let mut store = store.write();
             info!(root = debug(&root), "init");
             for entry in Self::scan(&root) {
                 store.add_entry(entry);
@@ -324,7 +318,7 @@ impl FilesystemMT for OrganizeFS {
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
         } else {
-            let store = self.store.read().unwrap();
+            let store = self.store.read();
             let r = store.find(path);
             info!(found = debug(&r), "found");
             if r.is_directory() {
@@ -376,7 +370,7 @@ impl FilesystemMT for OrganizeFS {
             "opendir (flags = {:#o})",
             flags
         );
-        if self.store.read().unwrap().find_dir(path).is_some() {
+        if self.store.read().find_dir(path).is_some() {
             Ok((0, 0))
         } else {
             Err(libc::ENOENT)
@@ -387,7 +381,7 @@ impl FilesystemMT for OrganizeFS {
     fn readdir(&self, req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
         debug!(req = debug(req), path = debug(path), fh, "readdir");
 
-        let store = self.store.read().unwrap();
+        let store = self.store.read();
         let children = store
             .find_dir(path)
             .unwrap()
@@ -462,7 +456,7 @@ impl FilesystemMT for OrganizeFS {
             "open (flags = {:#o})",
             flags
         );
-        let store = self.store.read().unwrap();
+        let store = self.store.read();
         store.find_file(path).map_or_else(
             || Err(libc::ENOENT),
             |e| {
@@ -557,7 +551,7 @@ impl FilesystemMT for OrganizeFS {
         let mut path = parent.to_path_buf();
         path.push(name);
 
-        let mut store = self.store.write().unwrap();
+        let mut store = self.store.write();
         store.find_file(&path).map_or_else(
             || Err(libc::ENOENT),
             |e| {
@@ -610,7 +604,7 @@ mod tests {
     fn new_test_fs(libc_wrapper: impl LibcWrapper + Send + Sync + 'static) -> OrganizeFS {
         let root = PathBuf::from("/");
         let pattern = PathBuf::from("/");
-        let store = Arc::new(RwLock::new(OrganizeFSStore::new(pattern)));
+        let store = Arc::new(parking_lot::RwLock::new(OrganizeFSStore::new(pattern)));
         let libc_wrapper = Box::new(libc_wrapper);
         OrganizeFS {
             root,
@@ -649,7 +643,7 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-            let mut store = fs.store.write().unwrap();
+            let mut store = fs.store.write();
             let entry = OrganizeFSEntry {
                 name: "present".into(),
                 host_path: "".into(),
@@ -682,7 +676,7 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-            let mut store = fs.store.write().unwrap();
+            let mut store = fs.store.write();
             let entry = OrganizeFSEntry {
                 name: "present".into(),
                 host_path: "".into(),
@@ -732,7 +726,7 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-            let mut store = fs.store.write().unwrap();
+            let mut store = fs.store.write();
             let entry = OrganizeFSEntry {
                 name: "present".into(),
                 host_path: "".into(),
@@ -765,7 +759,7 @@ mod tests {
         };
         let fs = new_test_fs(libc_wrapper);
         {
-            let mut store = fs.store.write().unwrap();
+            let mut store = fs.store.write();
             let entry = OrganizeFSEntry {
                 name: "present".into(),
                 host_path: "".into(),

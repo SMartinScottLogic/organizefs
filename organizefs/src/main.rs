@@ -5,17 +5,11 @@ use axum::{
 };
 use fuse_mt::{spawn_mount, FuseMT};
 use organizefs::{OrganizeFS, OrganizeFSStore};
-use std::{
-    env,
-    ffi::OsStr,
-    path::PathBuf,
-    str::FromStr,
-    sync::{Arc, RwLock},
-};
+use std::{env, ffi::OsStr, path::PathBuf, str::FromStr, sync::Arc};
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-type AxumState = State<Arc<RwLock<OrganizeFSStore>>>;
+type AxumState = State<Arc<parking_lot::RwLock<OrganizeFSStore>>>;
 
 #[tokio::main]
 async fn main() {
@@ -41,9 +35,9 @@ async fn main() {
     ];
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let stats = Arc::new(RwLock::new(OrganizeFSStore::new(PathBuf::from(
-        "/../s/../t/./{meta}/{size}",
-    ))));
+    let stats = Arc::new(parking_lot::RwLock::new(OrganizeFSStore::new(
+        PathBuf::from("/../s/../t/./{meta}/{size}"),
+    )));
     let organizefs = OrganizeFS::new(&args[1], stats.clone(), tx);
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 
@@ -53,19 +47,19 @@ async fn main() {
         .route(
             "/stats",
             get(|s: AxumState| async move {
-                let stats = s.read().unwrap();
+                let stats = s.read();
                 format!("{:?}", *stats)
             }),
         )
         .route(
             "/pattern",
-            get(|s: AxumState| async move { s.read().unwrap().get_pattern() }),
+            get(|s: AxumState| async move { s.read().get_pattern() }),
         )
         .route(
             "/pattern",
             post(|s: AxumState, body: String| async move {
                 // TODO reduce write lock time
-                s.write().unwrap().set_pattern(&body);
+                s.write().set_pattern(&body);
             }),
         )
         .with_state(stats.clone());

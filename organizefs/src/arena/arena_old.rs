@@ -327,27 +327,20 @@ impl<T: PartialEq + Clone> OldArena<T> {
 
 #[cfg(test)]
 mod test {
-    use std::path::PathBuf;
+    use std::{ops::Index, path::PathBuf};
 
+    use file_proc_macro::FsFile;
     use tracing_test::traced_test;
 
-    use crate::common::File;
+    use crate::common::FsFile;
 
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
+    #[derive(FsFile)]
     struct TestFile {
-        meta: String,
-        size: String,
-    }
-    impl File for TestFile {
-        fn meta(&self) -> &str {
-            todo!()
-        }
-
-        fn size(&self) -> &str {
-            todo!()
-        }
+        #[fsfile="meta"] meta: String,
+        #[fsfile="size"] size: String,
     }
 
     #[test]
