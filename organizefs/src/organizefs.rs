@@ -28,13 +28,14 @@ lazy_static::lazy_static! {
 }
 static TTL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[derive(FsFile)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, FsFile)]
 struct OrganizeFSEntry {
     name: OsString,
     host_path: PathBuf,
-    #[fsfile="size"] size: String,
-    #[fsfile="meta"] mime: String,
+    #[fsfile = "size"]
+    size: String,
+    #[fsfile = "meta"]
+    mime: String,
 }
 
 impl OrganizeFSEntry {
@@ -101,8 +102,14 @@ impl OrganizeFSStore {
         }
     }
     #[instrument]
-    fn remove_entry(&mut self, entry: &OrganizeFSEntry) {
+    fn remove_entry(&mut self, path: &Path) {
         // TODO Remove file from entries
+        debug!(
+            entry = debug(&path),
+            arena = debug(&self.arena),
+            "remove entry"
+        );
+        self.arena.remove(path);
     }
 
     #[instrument]
@@ -556,9 +563,12 @@ impl FilesystemMT for OrganizeFS {
             || Err(libc::ENOENT),
             |e| {
                 let entry = store.entries.get(e).unwrap().to_owned();
-                match self.libc_wrapper.unlink(entry.host_path.to_owned()) {
+                match self.libc_wrapper.unlink(entry.host_path) {
                     Ok(_) => {
-                        store.remove_entry(&entry);
+                        if store.arena.remove(&path) {
+                            let dropped = store.entries.remove(e);
+                            debug!(dropped = debug(dropped), "dropped");
+                        }
                         Ok(())
                     }
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
@@ -745,6 +755,11 @@ mod tests {
         let name = std::ffi::OsString::from("present");
         let r = fs.unlink(req, &parent, &name);
         assert!(r.is_ok());
+        {
+            let store = fs.store.read();
+            assert_eq!(store.arena.len(), 1);
+            assert!(store.entries.is_empty());
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     fmt::Debug,
-    path::Path,
+    path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use tracing::{debug, error, info, instrument};
@@ -31,7 +32,7 @@ impl<T> Debug for NewArena<T> {
 }
 impl<T> Arena<T> for NewArena<T>
 where
-    T: Clone + Debug + Send + Sync,
+    T: Clone + Debug + PartialEq + Send + Sync,
 {
     type Entry = NewArenaElement<T>;
 
@@ -125,6 +126,70 @@ where
     }
 }
 
+impl<T: Clone> NewArena<T> {
+    fn find_parent_mut(&mut self, path: &Path) -> Option<&mut NewArenaElement<T>> {
+        let binding = PathBuf::from_str("/").unwrap();
+        let path = match path.parent() {
+            None => binding.as_path(),
+            Some(p) => p,
+        };
+        info!(path = debug(path), "find");
+        debug!(path = debug(path), data = debug(&self.data), "find");
+
+        let mut parent_id = 0_usize;
+        for component in path.components() {
+            debug!(component = debug(component), "find parent");
+            parent_id = match component {
+                std::path::Component::RootDir => 0_usize,
+                std::path::Component::Normal(p) => {
+                    debug!("search for {p:?} in children of {parent_id:?}");
+                    match self.data.get(&parent_id).and_then(|p| p.children()) {
+                        Some(children) => {
+                            let f = match children.get(p) {
+                                None => return None,
+                                Some(c) => c,
+                            };
+                            debug!(
+                                needle = debug(p),
+                                found = debug(f),
+                                "found child"
+                            );
+                            *f
+                        }
+                        _ => {
+                            error!("{:?} has no children, expected at least {:?}", parent_id, p);
+                            return None;
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        let found = self.data.get_mut(&parent_id);
+        debug!(
+            seek = debug(path.components().last()),
+            found = debug(&found),
+            "find"
+        );
+        found
+    }
+
+    pub fn remove(&mut self, path: &Path) -> bool {
+        let parent = self.find_parent_mut(path);
+        if let Some(parent) = parent {
+            if let Some(children) = parent.children_mut() {
+                debug!(path = debug(path), children = debug(&children), "remove");
+                if let Some(id) = children.remove(path.file_name().unwrap()) {
+                    let dropped = self.data.remove(&id);
+                    debug!(dropped = debug(&dropped), id, path = debug(path), "dropped");
+                    return dropped.is_some();
+                }
+            }
+        }
+        false
+    }
+}
+
 impl<T: Debug> NewArena<T> {
     fn upsert(
         &mut self,
@@ -154,7 +219,7 @@ impl<T: Debug> NewArena<T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum NewArenaElement<T> {
     Root(HashMap<OsString, usize>),
     Leaf(T),

@@ -336,11 +336,12 @@ mod test {
 
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq)]
-    #[derive(FsFile)]
+    #[derive(Debug, Clone, PartialEq, FsFile)]
     struct TestFile {
-        #[fsfile="meta"] meta: String,
-        #[fsfile="size"] size: String,
+        #[fsfile = "meta"]
+        meta: String,
+        #[fsfile = "size"]
+        size: String,
     }
 
     #[test]

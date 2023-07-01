@@ -51,11 +51,12 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Clone)]
-    #[derive(FsFile)]
+    #[derive(Debug, Clone, FsFile)]
     struct TestFile<'a> {
-        #[fsfile="meta"] meta: &'a str,
-        #[fsfile="size"] size: &'a str,
+        #[fsfile = "meta"]
+        meta: &'a str,
+        #[fsfile = "size"]
+        size: &'a str,
         id: usize,
     }
 

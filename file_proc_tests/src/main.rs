@@ -9,7 +9,7 @@ struct One {
     one_meta: String,
     #[fsfile = "size"]
     one_size: String,
-    data: String,
+    _data: String,
 }
 
 #[derive(Default, FsFile)]
@@ -32,7 +32,7 @@ mod test {
         let one = One {
             one_meta: "m".into(),
             one_size: "s".into(),
-            data: "d".into(),
+            _data: "d".into(),
         };
         assert_eq!(&one["meta"], "m");
         assert_eq!(&one["size"], "s");
