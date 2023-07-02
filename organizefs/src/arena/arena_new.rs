@@ -149,11 +149,7 @@ impl<T: Clone> NewArena<T> {
                                 None => return None,
                                 Some(c) => c,
                             };
-                            debug!(
-                                needle = debug(p),
-                                found = debug(f),
-                                "found child"
-                            );
+                            debug!(needle = debug(p), found = debug(f), "found child");
                             *f
                         }
                         _ => {
