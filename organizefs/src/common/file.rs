@@ -17,6 +17,7 @@ where
     component
         .replace("{meta}", &file["meta"])
         .replace("{size}", &file["size"])
+        .replace("{mdate}", &file["mdate"])
 }
 
 #[instrument(level = "debug")]
@@ -57,6 +58,8 @@ mod tests {
         meta: &'a str,
         #[fsfile = "size"]
         size: &'a str,
+        #[fsfile = "mdate"]
+        mdate: &'a str,
         id: usize,
     }
 
@@ -66,11 +69,13 @@ mod tests {
             TestFile {
                 meta: "1",
                 size: "1",
+                mdate: "2023/08/04",
                 id: 0,
             },
             TestFile {
                 meta: "1",
                 size: "2",
+                mdate: "2023/08/05",
                 id: 1,
             },
         ];
@@ -88,16 +93,19 @@ mod tests {
             TestFile {
                 meta: "1",
                 size: "1",
+                mdate: "2023/08/04",
                 id: 0,
             },
             TestFile {
                 meta: "1",
                 size: "2",
+                mdate: "2023/08/04",
                 id: 1,
             },
             TestFile {
                 meta: "2",
                 size: "0",
+                mdate: "2023/08/04",
                 id: 2,
             },
         ];
@@ -115,21 +123,25 @@ mod tests {
             TestFile {
                 meta: "1",
                 size: "1",
+                mdate: "2023/08/04",
                 id: 0,
             },
             TestFile {
                 meta: "1",
                 size: "2",
+                mdate: "2023/08/04",
                 id: 1,
             },
             TestFile {
                 meta: "1",
                 size: "2",
+                mdate: "2023/08/04",
                 id: 2,
             },
             TestFile {
                 meta: "2",
                 size: "0",
+                mdate: "2023/08/04",
                 id: 3,
             },
         ];

@@ -15,9 +15,11 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
+use time::macros::format_description;
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
+use crate::common::{DirEntry, Metadata};
 use crate::{
     arena::{Arena, Entry, NewArena},
     common::{expand, FsFile, Normalize},
@@ -37,16 +39,27 @@ struct OrganizeFSEntry {
     size: String,
     #[fsfile = "meta"]
     mime: String,
+    #[fsfile = "mdate"]
+    modified_date: String,
 }
 
 impl OrganizeFSEntry {
-    fn new(root: &Path, entry: &walkdir::DirEntry, meta: &fs::Metadata) -> Self {
-        let host_path = root.join(entry.path()).canonicalize().unwrap();
+    fn new(root: &Path, entry: &impl DirEntry, meta: &impl Metadata) -> Self {
+        debug!(
+            root = debug(root.join(entry.path()).normalize()),
+            "normalize"
+        );
+        let host_path = root.join(entry.path()).normalize();
         let size = meta.len().format_size(*FORMAT);
         let mime = tree_magic_mini::from_filepath(&host_path)
             .unwrap_or_default()
             .replace('/', "_");
         let name = entry.file_name().to_os_string();
+        let modified_date: time::OffsetDateTime =
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH).into();
+        let modified_date = modified_date
+            .format(format_description!("[year]-[month]-[day]"))
+            .unwrap_or_else(|_| "1970-01-01".to_string());
 
         debug!(
             root = debug(root),
@@ -54,13 +67,15 @@ impl OrganizeFSEntry {
             meta = debug(meta),
             path = debug(&host_path),
             size,
-            mime
+            mime,
+            modified_date
         );
         Self {
             host_path,
             name,
             size,
             mime,
+            modified_date,
         }
     }
 
@@ -92,26 +107,17 @@ impl Debug for OrganizeFSStore {
             .finish()
     }
 }
-type ArenaEntry = <NewArena<Inode> as Arena<Inode>>::Entry;
+type ArenaType = NewArena<Inode>;
+type ArenaEntry = <ArenaType as Arena<Inode>>::Entry;
 impl OrganizeFSStore {
     #[instrument]
     pub fn new(pattern: PathBuf) -> Self {
         Self {
             pattern: pattern.normalize(),
-            arena: NewArena::<Inode>::default(),
+            arena: ArenaType::default(),
             entries: HashMap::new(),
             max_entries: Inode::from(0),
         }
-    }
-    #[instrument]
-    fn remove_entry(&mut self, path: &Path) {
-        // TODO Remove file from entries
-        debug!(
-            entry = debug(&path),
-            arena = debug(&self.arena),
-            "remove entry"
-        );
-        self.arena.remove(path);
     }
 
     #[instrument]
@@ -125,7 +131,7 @@ impl OrganizeFSStore {
     }
 
     #[instrument]
-    fn add_entry_to_arena(arena: &mut NewArena<Inode>, local_path: &Path, id: Inode) {
+    fn add_entry_to_arena(arena: &mut ArenaType, local_path: &Path, id: Inode) {
         debug!(
             arena = debug(&arena),
             id = debug(&id),
@@ -173,7 +179,7 @@ impl AddAssign<usize> for Inode {
 }
 
 pub struct OrganizeFSStore {
-    arena: NewArena<Inode>,
+    arena: ArenaType,
     entries: HashMap<Inode, OrganizeFSEntry>,
     max_entries: Inode,
     pattern: PathBuf,
@@ -187,7 +193,7 @@ impl OrganizeFSStore {
         let pattern = PathBuf::from(pattern).normalize();
         if pattern != self.pattern {
             // Re-patterning of filesystem
-            let mut arena = NewArena::<Inode>::default();
+            let mut arena = ArenaType::default();
             for (id, entry) in self.entries.iter() {
                 let local_path = entry.local_path(&pattern);
                 Self::add_entry_to_arena(&mut arena, &local_path, *id);
@@ -599,6 +605,7 @@ mod tests {
 
     use libc_wrapper::MockLibcWrapper;
 
+    use crate::common::{MockDirEntry, MockMetadata};
     use crate::libc_wrapper;
 
     // Note this useful idiom: importing names from outer (for mod tests) scope.
@@ -616,6 +623,501 @@ mod tests {
             libc_wrapper,
             shutdown_signal: Mutex::new(None),
         }
+    }
+
+    #[test]
+    #[traced_test]
+    fn organize_fsentry_new() {
+        let root = PathBuf::from("/test/data/path");
+        let entry = {
+            let mut entry = MockDirEntry::new();
+            entry.expect_path().return_const(PathBuf::from("path/"));
+            entry
+                .expect_file_name()
+                .return_const(OsString::from("file"));
+            entry
+        };
+        let meta = {
+            let mut metadata = MockMetadata::new();
+            metadata
+                .expect_len()
+                .return_const(1024_u64 * 1024 * 1024 * 100);
+            metadata.expect_modified().returning(|| {
+                Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(40 * 365 * 24 * 60 * 60))
+            });
+            metadata
+        };
+        let entry = OrganizeFSEntry::new(&root, &entry, &meta);
+        assert_eq!(entry.size, "107.37GB");
+        assert_eq!(entry.name, "file");
+        assert_eq!(entry.host_path, PathBuf::from("/test/data/path/path"));
+        assert_eq!(entry.modified_date, "2009-12-22");
+        assert_eq!(entry.mime, "");
+    }
+
+    #[test]
+    #[traced_test]
+    fn mode_to_filetype() {
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFDIR + 0o644),
+            FileType::Directory
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFREG + 0o644),
+            FileType::RegularFile
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFLNK + 0o644),
+            FileType::Symlink
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFBLK + 0o644),
+            FileType::BlockDevice
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFCHR + 0o644),
+            FileType::CharDevice
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFIFO + 0o644),
+            FileType::NamedPipe
+        );
+        assert_eq!(
+            OrganizeFS::mode_to_filetype(libc::S_IFSOCK + 0o644),
+            FileType::Socket
+        );
+    }
+
+    #[test]
+    #[traced_test]
+    #[should_panic(expected = "unknown file type")]
+    fn mode_to_filetype_err() {
+        OrganizeFS::mode_to_filetype(0);
+    }
+
+    #[test]
+    #[traced_test]
+    fn get_pattern() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let store = fs.store.read();
+        assert_eq!("/", store.get_pattern());
+    }
+
+    #[test]
+    #[traced_test]
+    fn set_pattern() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        // Add file
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        // Alter pattern
+        {
+            let mut store = fs.store.write();
+            store.set_pattern("/t/{meta}/");
+        }
+        let store = fs.store.read();
+        assert_eq!("/t/{meta}", store.get_pattern());
+        assert_eq!(store.entries.len(), 1);
+        let entry = store.arena.find(&PathBuf::from("/t/text_plain/present"));
+        assert!(entry.is_file());
+    }
+
+    // init tests
+    #[test]
+    #[traced_test]
+    fn init() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+
+        assert!(fs.init(req).is_ok());
+    }
+
+    // destroy tests
+    #[test]
+    #[traced_test]
+    fn destroy_nosignal() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        fs.destroy();
+    }
+
+    #[test]
+    #[traced_test]
+    fn destroy_signal() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let mut fs = new_test_fs(libc_wrapper);
+        fs.shutdown_signal = Mutex::new(Some(tx));
+        fs.destroy();
+        assert!(rx.try_recv().is_ok());
+    }
+
+    // statfs tests
+    #[test]
+    #[traced_test]
+    fn statfs_ok() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_statfs().returning(|_| {
+                let mut s = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+                let stat = unsafe { s.assume_init_mut() };
+                stat.f_blocks = 1024;
+                stat.f_bfree = 512;
+                stat.f_bavail = 500;
+                stat.f_files = 2048;
+                stat.f_ffree = 1000;
+                stat.f_bsize = 4096;
+                stat.f_namelen = 256;
+                Ok(stat.to_owned())
+            });
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let resp = fs.statfs(req, &PathBuf::from("/"));
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    #[traced_test]
+    fn statfs_err() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper
+                .expect_statfs()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let resp = fs.statfs(req, &PathBuf::from("/"));
+        assert_eq!(resp.err(), Some(libc::EACCES));
+    }
+
+    // opendir tests
+    #[test]
+    #[traced_test]
+    fn opendir_present() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.opendir(
+            req,
+            &PathBuf::from("/"),
+            libc::O_DIRECTORY.try_into().unwrap(),
+        );
+        assert!(resp.is_ok());
+        assert_eq!(resp.unwrap(), (0, 0));
+    }
+
+    #[test]
+    #[traced_test]
+    fn opendir_missing() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.opendir(
+            req,
+            &PathBuf::from("/missing"),
+            libc::O_DIRECTORY.try_into().unwrap(),
+        );
+        assert_eq!(resp.err(), Some(libc::ENOENT));
+    }
+
+    // releasedir tests
+    #[test]
+    #[traced_test]
+    fn releasedir() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let fh = 1;
+        let resp = fs.releasedir(req, &PathBuf::from("/test"), fh, 0);
+        assert!(resp.is_ok());
+    }
+
+    // getattr tests
+    #[test]
+    #[traced_test]
+    fn getattr_withfh_err() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper
+                .expect_fstat()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let fh = 1;
+        let resp = fs.getattr(req, &PathBuf::from("/test"), Some(fh));
+        assert_eq!(resp.err(), Some(libc::EACCES));
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_withfh_ok() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_fstat().returning(|_| {
+                let mut s = std::mem::MaybeUninit::<libc::stat>::zeroed();
+                let stat = unsafe { s.assume_init_mut() };
+                stat.st_mode = libc::S_IFREG + 0o0644;
+                stat.st_size = 5;
+                stat.st_nlink = 1;
+                Ok(stat.to_owned())
+            });
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let fh = 1;
+        let resp = fs.getattr(req, &PathBuf::from("/test"), Some(fh));
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_nofh_missing() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let resp = fs.getattr(req, &PathBuf::from("/test"), None);
+        assert_eq!(resp.err(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_nofh_file_err() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper
+                .expect_lstat()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.getattr(req, &PathBuf::from("/test"), None);
+        assert_eq!(resp.err(), Some(libc::EACCES));
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_nofh_file_ok() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_lstat().returning(|_| {
+                let mut s = std::mem::MaybeUninit::<libc::stat>::zeroed();
+                let stat = unsafe { s.assume_init_mut() };
+                stat.st_mode = libc::S_IFREG + 0o0644;
+                stat.st_size = 5;
+                stat.st_nlink = 1;
+                Ok(stat.to_owned())
+            });
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.getattr(req, &PathBuf::from("/test"), None);
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_nofh_dir_err() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper
+                .expect_lstat()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.getattr(req, &PathBuf::from("/"), None);
+        assert_eq!(resp.err(), Some(libc::EACCES));
+    }
+
+    #[test]
+    #[traced_test]
+    fn getattr_nofh_dir_ok() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_lstat().returning(|_| {
+                let mut s = std::mem::MaybeUninit::<libc::stat>::zeroed();
+                let stat = unsafe { s.assume_init_mut() };
+                stat.st_mode = libc::S_IFDIR + 0o0755;
+                stat.st_size = 5;
+                stat.st_nlink = 1;
+                Ok(stat.to_owned())
+            });
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "test".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let resp = fs.getattr(req, &PathBuf::from("/"), None);
+        assert!(resp.is_ok());
     }
 
     // open tests
@@ -653,6 +1155,7 @@ mod tests {
                 host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
             };
             store.add_entry(entry);
         }
@@ -686,6 +1189,7 @@ mod tests {
                 host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
             };
             store.add_entry(entry);
         }
@@ -699,6 +1203,86 @@ mod tests {
         let name = std::ffi::OsString::from("present");
         let r = fs.open(req, &parent.join(name), 0);
         assert_eq!(r.err(), Some(libc::EACCES));
+    }
+
+    // flush tests
+    #[test]
+    #[traced_test]
+    fn flush_unimplemented() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let path = PathBuf::from("/missing");
+        let r = fs.flush(req, &path, 0, 0);
+        assert_eq!(r.err(), Some(libc::ENOSYS));
+    }
+
+    // release tests
+    #[test]
+    #[traced_test]
+    fn release_no_filehandle() {
+        let libc_wrapper = MockLibcWrapper::new();
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let path = PathBuf::from("/missing");
+        let r = fs.release(req, &path, 0, 0, 0, true);
+        assert_eq!(r.err(), Some(libc::ENOENT));
+    }
+
+    #[test]
+    #[traced_test]
+    fn release_error() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper
+                .expect_close()
+                .returning(|_| Err(io::Error::from_raw_os_error(libc::EACCES)));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let path = PathBuf::from("/missing");
+        let r = fs.release(req, &path, 1, 0, 0, true);
+        assert_eq!(r.err(), Some(libc::EACCES));
+    }
+
+    #[test]
+    #[traced_test]
+    fn release_ok() {
+        let libc_wrapper = {
+            let mut libc_wrapper = MockLibcWrapper::new();
+            libc_wrapper.expect_close().returning(|_| Ok(()));
+            libc_wrapper
+        };
+
+        let fs = new_test_fs(libc_wrapper);
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let path = PathBuf::from("/missing");
+        let r = fs.release(req, &path, 1, 0, 0, true);
+        assert!(r.is_ok());
     }
 
     // unlink tests
@@ -736,6 +1320,7 @@ mod tests {
                 host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
             };
             store.add_entry(entry);
         }
@@ -774,6 +1359,7 @@ mod tests {
                 host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
             };
             store.add_entry(entry);
         }
@@ -787,5 +1373,37 @@ mod tests {
         let name = std::ffi::OsString::from("present");
         let r = fs.unlink(req, &parent, &name);
         assert_eq!(r.err(), Some(libc::EACCES));
+    }
+
+    // rename tests
+    // TODO Proper implementation
+    #[test]
+    #[traced_test]
+    fn rename_unimplemented() {
+        let libc_wrapper = MockLibcWrapper::new();
+        let fs = new_test_fs(libc_wrapper);
+        {
+            let mut store = fs.store.write();
+            let entry = OrganizeFSEntry {
+                name: "present".into(),
+                host_path: "".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        let req: RequestInfo = RequestInfo {
+            unique: 0,
+            pid: 0,
+            gid: 0,
+            uid: 0,
+        };
+        let parent = PathBuf::from("/");
+        let name = std::ffi::OsString::from("present");
+        let newparent = PathBuf::from("/");
+        let newname = std::ffi::OsString::from("missing");
+        let r = fs.rename(req, &parent, &name, &newparent, &newname);
+        assert_eq!(r.err(), Some(libc::ENOSYS));
     }
 }

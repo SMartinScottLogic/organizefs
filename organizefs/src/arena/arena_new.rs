@@ -126,7 +126,7 @@ where
     }
 }
 
-impl<T: Clone> NewArena<T> {
+impl<T: Clone + Copy> NewArena<T> {
     fn find_parent_mut(&mut self, path: &Path) -> Option<&mut NewArenaElement<T>> {
         let binding = PathBuf::from_str("/").unwrap();
         let path = match path.parent() {

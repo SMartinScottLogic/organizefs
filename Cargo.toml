@@ -3,6 +3,7 @@ members = [
     "file_proc_macro",
     "file_proc_tests",
     "organizefs",
+    "xtask",
 ]
 
 [workspace.dependencies]

@@ -22,7 +22,7 @@ fn gen_mapping(field: &syn::Field) -> Vec<quote::__private::TokenStream> {
                     panic!("gen mapping found unexpected '{:?}'", v);
                 }
             }
-            _ => panic!(),
+            _ => panic!("unexpected meta '{:?}", attr.meta),
         })
         .map(|key| {
             quote! {
@@ -36,12 +36,12 @@ fn gen_mappings(fields: syn::Fields) -> Vec<quote::__private::TokenStream> {
     fields.iter().flat_map(gen_mapping).collect()
 }
 
-#[proc_macro_derive(FsFile, attributes(fsfile))]
+#[proc_macro_derive(FsFile, attributes(fsfile, fail))]
 pub fn file_derive(input: TokenStream) -> TokenStream {
     let input: DeriveInput = parse_macro_input!(input);
     let mappings = match input.data {
         syn::Data::Struct(syn::DataStruct { fields, .. }) => gen_mappings(fields),
-        _ => panic!(),
+        _ => panic!("Unexpected input: {:?}", input.data),
     };
     let ident = &input.ident;
     let generics = &input.generics;
@@ -54,7 +54,7 @@ pub fn file_derive(input: TokenStream) -> TokenStream {
             fn index(&self, index: &str) -> &Self::Output {
                 match index {
                     #(#mappings,)*
-                    _ => unimplemented!()
+                    _ => unimplemented!("No mapping for {} in {}", index, stringify!(#ident)),
                 }
             }
 

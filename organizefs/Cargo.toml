@@ -23,6 +23,7 @@ tree_magic_mini = "3.0"
 mockall = "0.11"
 indextree-ng = { version = "1.0" }
 parking_lot = "0.12.1"
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 #[dependencies.common]
 #path="../common"
