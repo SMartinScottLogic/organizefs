@@ -1,15 +1,8 @@
-use axum::{
-    extract::State,
-    routing::{get, post},
-    Router,
-};
 use fuse_mt::{spawn_mount, FuseMT};
-use organizefs::{OrganizeFS, OrganizeFSStore};
+use organizefs::{server, OrganizeFS, OrganizeFSStore};
 use std::{env, ffi::OsStr, path::PathBuf, str::FromStr, sync::Arc};
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
-
-type AxumState = State<Arc<parking_lot::RwLock<OrganizeFSStore>>>;
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +23,8 @@ async fn main() {
     let fuse_args = [
         OsStr::new("-o"),
         OsStr::new("fsname=organizefs"),
+        OsStr::new("-o"),
+        OsStr::new("allow_other"),
         // OsStr::new("-o"),
         // OsStr::new("auto_unmount"),
     ];
@@ -41,36 +36,6 @@ async fn main() {
     let organizefs = OrganizeFS::new(&args[1], stats.clone(), tx);
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 
-    // Setup REST endpoints
-    let app = Router::new()
-        .route("/", get(|| async { "Hello, World!" }))
-        .route(
-            "/stats",
-            get(|s: AxumState| async move {
-                let stats = s.read();
-                format!("{:?}", *stats)
-            }),
-        )
-        .route(
-            "/pattern",
-            get(|s: AxumState| async move { s.read().get_pattern() }),
-        )
-        .route(
-            "/pattern",
-            post(|s: AxumState, body: String| async move {
-                // TODO reduce write lock time
-                s.write().set_pattern(&body);
-            }),
-        )
-        .with_state(stats.clone());
-
-    // run it with hyper on localhost:3000
-    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(async {
-            rx.await.ok();
-        })
-        .await
-        .unwrap();
+    server(stats, rx).await.unwrap();
     fs.join();
 }

@@ -1,3 +1,9 @@
+use crate::common::{DirEntry, Metadata};
+use crate::{
+    arena::{Arena, Entry, NewArena},
+    common::{expand, FsFile, Normalize},
+    libc_wrapper::{LibcWrapper, LibcWrapperReal},
+};
 use file_proc_macro::FsFile;
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
@@ -18,13 +24,6 @@ use std::{
 use time::macros::format_description;
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
-
-use crate::common::{DirEntry, Metadata};
-use crate::{
-    arena::{Arena, Entry, NewArena},
-    common::{expand, FsFile, Normalize},
-    libc_wrapper::{LibcWrapper, LibcWrapperReal},
-};
 
 lazy_static::lazy_static! {
     static ref FORMAT: humansize::FormatSizeOptions = humansize::DECIMAL.space_after_value(false).decimal_zeroes(2);
@@ -120,7 +119,7 @@ impl OrganizeFSStore {
         }
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn add_entry(&mut self, entry: OrganizeFSEntry) {
         let id = self.max_entries;
         self.max_entries += 1;
@@ -130,7 +129,7 @@ impl OrganizeFSStore {
         Self::add_entry_to_arena(&mut self.arena, &local_path, id);
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn add_entry_to_arena(arena: &mut ArenaType, local_path: &Path, id: Inode) {
         debug!(
             arena = debug(&arena),
@@ -141,12 +140,12 @@ impl OrganizeFSStore {
         arena.add_file(local_path, id).unwrap();
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn find(&self, path: &Path) -> ArenaEntry {
         self.arena.find(path)
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn find_file(&self, path: &Path) -> Option<Inode> {
         self.find(path)
             .filter(|e| e.is_file())
@@ -254,7 +253,7 @@ impl OrganizeFS {
             .filter_map(|entry| Self::process(root, &entry))
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn process(root: &Path, entry: &walkdir::DirEntry) -> Option<OrganizeFSEntry> {
         if entry.file_type().is_file() && entry.path().parent().is_some() {
             if let Ok(meta) = fs::symlink_metadata(entry.path()) {
@@ -339,7 +338,7 @@ impl FilesystemMT for OrganizeFS {
     }
 
     fn getattr(&self, req: RequestInfo, path: &Path, fh: Option<u64>) -> ResultEntry {
-        info!(req = debug(req), path = debug(path), fh, "getattr");
+        debug!(req = debug(req), path = debug(path), fh, "getattr");
         if let Some(fh) = fh {
             match self.libc_wrapper.fstat(fh) {
                 Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
@@ -348,7 +347,7 @@ impl FilesystemMT for OrganizeFS {
         } else {
             let store = self.store.read();
             let r = store.find(path);
-            info!(found = debug(&r), "found");
+            debug!(found = debug(&r), "found");
             if r.is_directory() {
                 match self.libc_wrapper.lstat(self.root.to_owned()) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
@@ -563,11 +562,13 @@ impl FilesystemMT for OrganizeFS {
             || Err(libc::ENOENT),
             |e| {
                 let entry = store.entries.get(&e).unwrap().to_owned();
+                info!(inode = debug(e), entry = debug(&entry), "get");
                 match self.libc_wrapper.unlink(entry.host_path) {
                     Ok(_) => {
+                        info!("unlinked");
                         if store.arena.remove(&path) {
                             let dropped = store.entries.remove(&e);
-                            debug!(dropped = debug(dropped), "dropped");
+                            info!(dropped = debug(dropped), "dropped");
                         }
                         Ok(())
                     }
@@ -605,7 +606,7 @@ mod tests {
 
     use libc_wrapper::MockLibcWrapper;
 
-    use crate::common::{MockDirEntry, MockMetadata};
+    use crate::common::mock_traits::{MockDirEntry, MockMetadata};
     use crate::libc_wrapper;
 
     // Note this useful idiom: importing names from outer (for mod tests) scope.

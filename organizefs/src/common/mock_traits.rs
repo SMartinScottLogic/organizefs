@@ -20,11 +20,15 @@ impl DirEntry for walkdir::DirEntry {
 #[automock]
 pub trait Metadata: Debug {
     fn len(&self) -> u64;
+    fn is_empty(&self) -> bool;
     fn modified(&self) -> std::io::Result<SystemTime>;
 }
 impl Metadata for fs::Metadata {
     fn len(&self) -> u64 {
         self.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
     fn modified(&self) -> std::io::Result<SystemTime> {
         self.modified()
