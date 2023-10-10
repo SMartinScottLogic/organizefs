@@ -29,8 +29,8 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 #[dependencies.common]
 #path="../common"
 
-#[dependencies.arena]
-#path="../arena"
+[dependencies.arena]
+path="../arena"
 
 [dependencies.file_proc_macro]
 path="../file_proc_macro"
