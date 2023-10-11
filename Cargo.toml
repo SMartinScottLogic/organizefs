@@ -1,8 +1,11 @@
 [workspace]
+resolver = "2"
 members = [
     "file_proc_macro",
     "file_proc_tests",
     "organizefs",
+    "xtask",
+    "arena"
 ]
 
 [workspace.dependencies]

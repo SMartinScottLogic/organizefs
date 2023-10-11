@@ -3,7 +3,7 @@ use std::ops::Index;
 use file_proc_macro::FsFile;
 use organizefs::common::FsFile;
 
-#[derive(Default, FsFile)]
+#[derive(FsFile)]
 struct One {
     #[fsfile = "meta"]
     one_meta: String,
@@ -12,20 +12,26 @@ struct One {
     _data: String,
 }
 
-#[derive(Default, FsFile)]
+#[derive(FsFile)]
 struct Two<'a> {
     #[fsfile = "meta"]
     #[fsfile = "size"]
     data: &'a str,
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     println!("test");
+    Ok(())
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_main() {
+        assert!(main().is_ok());
+    }
 
     #[test]
     fn one() {

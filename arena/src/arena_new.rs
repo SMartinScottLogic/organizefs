@@ -6,9 +6,9 @@ use std::{
     str::FromStr,
 };
 
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, instrument};
 
-use crate::arena::{
+use crate::{
     arena_types::{Arena, Entry},
     ArenaError,
 };
@@ -47,7 +47,6 @@ where
     }
 
     fn add_file(&mut self, file: &Path, entry: T) -> Result<(), ArenaError> {
-        info!(file = debug(file), entry = debug(&entry), "add_file");
         debug!(
             file = debug(file),
             entry = debug(&entry),
@@ -78,9 +77,8 @@ where
             .map(|_id| ())
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn find(&self, path: &Path) -> Self::Entry {
-        info!(path = debug(path), "find");
         debug!(path = debug(path), data = debug(&self.data), "find");
 
         let mut found = self.data.get(&0).unwrap();
@@ -126,14 +124,13 @@ where
     }
 }
 
-impl<T: Clone> NewArena<T> {
+impl<T: Clone + Copy> NewArena<T> {
     fn find_parent_mut(&mut self, path: &Path) -> Option<&mut NewArenaElement<T>> {
         let binding = PathBuf::from_str("/").unwrap();
         let path = match path.parent() {
             None => binding.as_path(),
             Some(p) => p,
         };
-        info!(path = debug(path), "find");
         debug!(path = debug(path), data = debug(&self.data), "find");
 
         let mut parent_id = 0_usize;

@@ -97,8 +97,7 @@ impl LibcWrapper for LibcWrapperReal {
             error!("read({:?}): {}", fd, e);
             return Err(e);
         }
-        let mut buf = Vec::new();
-        buf.resize(count.try_into().unwrap(), 0);
+        let mut buf = vec![0; count.try_into().unwrap()];
 
         let result = unsafe {
             libc::read(
