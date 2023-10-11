@@ -1,0 +1,22 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = { workspace = true }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+lazy_static = { workspace = true }
+humansize = {version = "2.1", features = ["impl_style"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+# Determines the MIME type of a file by traversing a filetype tree.
+tree_magic_mini = "3.0"
+
+[dependencies.file_proc_macro]
+path="../file_proc_macro"
+
+[dependencies.common]
+path="../common"
+
+[dependencies.arena]
+path="../arena"

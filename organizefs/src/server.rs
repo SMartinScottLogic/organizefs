@@ -6,9 +6,8 @@ use axum::{
     Router,
 };
 use parking_lot::RwLock;
+use store::OrganizeFSStore;
 use tokio::sync::oneshot::Receiver;
-
-use crate::OrganizeFSStore;
 
 type Stats = Arc<RwLock<OrganizeFSStore>>;
 type AxumState = State<Stats>;
