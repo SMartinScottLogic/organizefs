@@ -6,10 +6,13 @@ use axum::{
     Router,
 };
 use parking_lot::RwLock;
-use store::OrganizeFSStore;
+use store::TreeStorage;
+//use store::{OrganizeFSEntry, OrganizeFSStore};
 use tokio::sync::oneshot::Receiver;
 
-type Stats = Arc<RwLock<OrganizeFSStore>>;
+use crate::organizefs::OrganizeFSEntry;
+
+type Stats = Arc<RwLock<TreeStorage<OrganizeFSEntry>>>;
 type AxumState = State<Stats>;
 
 /// Setup REST endpoints

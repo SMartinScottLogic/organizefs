@@ -1,5 +1,7 @@
+#![warn(missing_docs)]
+
 use mockall::automock;
-use std::{fmt::Debug, time::SystemTime, fs, path::Path, ffi::OsStr};
+use std::{ffi::OsStr, fmt::Debug, fs, path::Path, time::SystemTime};
 
 #[automock]
 pub trait DirEntry: Debug {

@@ -1,4 +1,10 @@
-use std::{ffi::CString, io, mem::MaybeUninit, os::unix::prelude::OsStrExt, path::PathBuf};
+use std::{
+    ffi::CString,
+    io,
+    mem::MaybeUninit,
+    os::unix::prelude::OsStrExt,
+    path::{Path, PathBuf},
+};
 
 use libc::c_void;
 use mockall::automock;
@@ -8,11 +14,11 @@ use tracing::error;
 pub trait LibcWrapper {
     fn statfs(&self, path: PathBuf) -> io::Result<libc::statfs>;
     fn fstat(&self, fh: u64) -> io::Result<libc::stat>;
-    fn lstat(&self, path: PathBuf) -> io::Result<libc::stat>;
-    fn open(&self, path: PathBuf, flags: i32) -> io::Result<i32>;
+    fn lstat(&self, path: &Path) -> io::Result<libc::stat>;
+    fn open(&self, path: &Path, flags: i32) -> io::Result<i32>;
     fn close(&self, fd: i32) -> io::Result<()>;
     fn read(&self, fd: i32, offset: i64, count: u32) -> io::Result<Vec<u8>>;
-    fn unlink(&self, path: PathBuf) -> io::Result<()>;
+    fn unlink(&self, path: &Path) -> io::Result<()>;
 }
 
 pub struct LibcWrapperReal;
@@ -52,10 +58,10 @@ impl LibcWrapper for LibcWrapperReal {
         }
     }
 
-    fn lstat(&self, path: PathBuf) -> io::Result<libc::stat> {
+    fn lstat(&self, path: &Path) -> io::Result<libc::stat> {
         let mut stat = MaybeUninit::<libc::stat>::uninit();
 
-        let cstr = CString::new(path.clone().into_os_string().as_bytes())?;
+        let cstr = CString::new(path.to_path_buf().into_os_string().as_bytes())?;
         let result = unsafe { libc::lstat(cstr.as_ptr(), stat.as_mut_ptr()) };
         if -1 == result {
             let e = io::Error::last_os_error();
@@ -67,8 +73,8 @@ impl LibcWrapper for LibcWrapperReal {
         }
     }
 
-    fn open(&self, path: PathBuf, flags: i32) -> io::Result<i32> {
-        let cstr = CString::new(path.clone().into_os_string().as_bytes())?;
+    fn open(&self, path: &Path, flags: i32) -> io::Result<i32> {
+        let cstr = CString::new(path.to_path_buf().into_os_string().as_bytes())?;
         let result = unsafe { libc::open(cstr.as_ptr(), flags) };
         if -1 == result {
             let e = io::Error::last_os_error();
@@ -114,8 +120,8 @@ impl LibcWrapper for LibcWrapperReal {
         Ok(buf)
     }
 
-    fn unlink(&self, path: PathBuf) -> io::Result<()> {
-        let cstr = CString::new(path.clone().into_os_string().as_bytes())?;
+    fn unlink(&self, path: &Path) -> io::Result<()> {
+        let cstr = CString::new(path.to_path_buf().into_os_string().as_bytes())?;
         let result = unsafe { libc::unlink(cstr.as_ptr()) };
         if -1 == result {
             let e = io::Error::last_os_error();

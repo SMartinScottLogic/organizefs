@@ -17,6 +17,3 @@ path="../file_proc_macro"
 
 [dependencies.common]
 path="../common"
-
-[dependencies.arena]
-path="../arena"

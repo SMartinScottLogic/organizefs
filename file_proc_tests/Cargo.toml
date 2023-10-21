@@ -8,3 +8,7 @@ path="../file_proc_macro"
 
 [dependencies.organizefs]
 path="../organizefs"
+
+[dependencies.common]
+path="../common"
+

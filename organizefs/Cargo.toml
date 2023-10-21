@@ -19,12 +19,14 @@ hyper = "0.14.25"
 walkdir = { workspace = true }
 indextree-ng = { version = "1.0" }
 parking_lot = "0.12.1"
+humansize = {version = "2.1", features = ["impl_style"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+lazy_static = { workspace = true }
+# Determines the MIME type of a file by traversing a filetype tree.
+tree_magic_mini = "3.0"
 
 [dependencies.common]
 path="../common"
-
-[dependencies.arena]
-path="../arena"
 
 [dependencies.file_proc_macro]
 path="../file_proc_macro"
