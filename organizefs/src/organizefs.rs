@@ -1,31 +1,21 @@
-//use common::{DirEntry, Metadata};
-//use arena::{Arena, Entry, NewArena};
 use crate::libc_wrapper::{LibcWrapper, LibcWrapperReal};
-use common::{FsFile, Normalize, expand};
+use common::{expand, FsFile, Normalize};
 use file_proc_macro::FsFile;
-use humansize::FormatSize;
-use store::{StorageEntry, TreeStorage, PatternLocalPath};
-// use store::{Entry, StoragePath};
-// use store::{OrganizeFSEntry, OrganizeFSStore};
-//use file_proc_macro::FsFile;
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
     ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
 };
+use humansize::FormatSize;
 use std::ffi::OsString;
-use std::ops::Index;
-//use humansize::FormatSize;
-//use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-//use std::ops::{AddAssign, Index};
+use std::ops::Index;
 use std::{
-    //    ffi::OsString,
-    //    fmt::Display,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
+use store::{PatternLocalPath, TreeStorage};
 use time::macros::format_description;
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
@@ -54,7 +44,12 @@ impl Display for OrganizeFSEntry {
 }
 impl PatternLocalPath for OrganizeFSEntry {
     fn new(root: &Path, entry: &dyn common::DirEntry, meta: &dyn common::Metadata) -> Self {
-        debug!(root = debug(root), entry = debug(entry), meta = debug(meta), "new");
+        debug!(
+            root = debug(root),
+            entry = debug(entry),
+            meta = debug(meta),
+            "new"
+        );
         let host_path = root.join(entry.path()).normalize();
         let size = meta.len().format_size(*FORMAT);
         let mime = tree_magic_mini::from_filepath(&host_path)
@@ -84,7 +79,7 @@ impl PatternLocalPath for OrganizeFSEntry {
             modified_date,
         }
     }
-    
+
     fn local_path(&self, pattern: &Path) -> PathBuf {
         debug!(self = debug(self), pattern = debug(pattern), "local_path");
         let mut path = pattern
@@ -589,7 +584,7 @@ mod tests {
     use libc_wrapper::MockLibcWrapper;
 
     use crate::libc_wrapper;
-    use common::{expand, FsFile, MockDirEntry, MockMetadata};
+    use common::{expand, FsFile};
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, FsFile)]
     struct TestEntry {
@@ -1444,8 +1439,12 @@ mod tests {
             store.add_entry(entry);
         }
         assert_eq!(store.len(), 2);
-        assert!(store.find(&PathBuf::from("/text_plain/10 B/present")).is_some());
-        assert!(store.find(&PathBuf::from("/text_plain/0 B/present")).is_some());
+        assert!(store
+            .find(&PathBuf::from("/text_plain/10 B/present"))
+            .is_some());
+        assert!(store
+            .find(&PathBuf::from("/text_plain/0 B/present"))
+            .is_some());
         assert_eq!(store.node_count(), 6);
-    }    
+    }
 }

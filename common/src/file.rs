@@ -2,8 +2,10 @@ use std::{fmt::Debug, ops::Index, path::Component};
 
 use tracing::instrument;
 
+/// Marker trait for structs which support component replacement.
 pub trait FsFile: for<'a> Index<&'a str, Output = str> {}
 
+/// Replace placeholder components with file characteristics.
 #[instrument(level = "debug")]
 pub fn expand<T>(component: &Component, file: &T) -> String
 where
