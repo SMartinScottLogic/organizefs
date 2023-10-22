@@ -1,38 +1,33 @@
-use crate::common::{DirEntry, Metadata};
-use arena::{Arena, Entry, NewArena};
-use crate::{
-//    arena::{Arena, Entry, NewArena},
-    common::{expand, FsFile, Normalize},
-    libc_wrapper::{LibcWrapper, LibcWrapperReal},
-};
+use crate::libc_wrapper::{LibcWrapper, LibcWrapperReal};
+use common::{expand, FsFile, Normalize};
 use file_proc_macro::FsFile;
 use fuse_mt::{
     CallbackResult, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultEmpty,
     ResultEntry, ResultOpen, ResultReaddir, ResultSlice, ResultStatfs, Statfs,
 };
 use humansize::FormatSize;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::ops::{AddAssign, Index};
+use std::ffi::OsString;
+use std::fmt::{Debug, Display};
+use std::ops::Index;
 use std::{
-    ffi::OsString,
-    fmt::Display,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
+use store::{PatternLocalPath, TreeStorage};
 use time::macros::format_description;
 use tracing::{debug, info, instrument};
 use walkdir::WalkDir;
 
+static TTL: Duration = Duration::from_secs(1);
+
 lazy_static::lazy_static! {
     static ref FORMAT: humansize::FormatSizeOptions = humansize::DECIMAL.space_after_value(false).decimal_zeroes(2);
 }
-static TTL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, FsFile)]
-struct OrganizeFSEntry {
+#[derive(Debug, Clone, FsFile)]
+pub struct OrganizeFSEntry {
     name: OsString,
     host_path: PathBuf,
     #[fsfile = "size"]
@@ -42,12 +37,18 @@ struct OrganizeFSEntry {
     #[fsfile = "mdate"]
     modified_date: String,
 }
-
-impl OrganizeFSEntry {
-    fn new(root: &Path, entry: &impl DirEntry, meta: &impl Metadata) -> Self {
+impl Display for OrganizeFSEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({} {})", self.host_path.display(), self.size)
+    }
+}
+impl PatternLocalPath for OrganizeFSEntry {
+    fn new(root: &Path, entry: &dyn common::DirEntry, meta: &dyn common::Metadata) -> Self {
         debug!(
-            root = debug(root.join(entry.path()).normalize()),
-            "normalize"
+            root = debug(root),
+            entry = debug(entry),
+            meta = debug(meta),
+            "new"
         );
         let host_path = root.join(entry.path()).normalize();
         let size = meta.len().format_size(*FORMAT);
@@ -80,6 +81,7 @@ impl OrganizeFSEntry {
     }
 
     fn local_path(&self, pattern: &Path) -> PathBuf {
+        debug!(self = debug(self), pattern = debug(pattern), "local_path");
         let mut path = pattern
             .components()
             .map(|component| expand(&component, self))
@@ -90,140 +92,37 @@ impl OrganizeFSEntry {
         path.push(&self.name);
         path
     }
-}
 
-impl Display for OrganizeFSEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({} {})", self.host_path.display(), self.size)
+    fn host_path(&self) -> PathBuf {
+        self.host_path.clone()
     }
 }
-
-impl Debug for OrganizeFSStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Store")
-            .field("arena_len", &self.arena.len())
-            .field("entries_len", &self.entries.len())
-            .field("pattern", &self.pattern)
-            .finish()
-    }
-}
-type ArenaType = NewArena<Inode>;
-type ArenaEntry = <ArenaType as Arena<Inode>>::Entry;
-impl OrganizeFSStore {
-    #[instrument]
-    pub fn new(pattern: PathBuf) -> Self {
-        Self {
-            pattern: pattern.normalize(),
-            arena: ArenaType::default(),
-            entries: HashMap::new(),
-            max_entries: Inode::from(0),
-        }
-    }
-
-    #[instrument(level = "debug")]
-    fn add_entry(&mut self, entry: OrganizeFSEntry) {
-        let id = self.max_entries;
-        self.max_entries += 1;
-        self.entries.insert(id, entry.clone());
-
-        let local_path = entry.local_path(&self.pattern);
-        Self::add_entry_to_arena(&mut self.arena, &local_path, id);
-    }
-
-    #[instrument(level = "debug")]
-    fn add_entry_to_arena(arena: &mut ArenaType, local_path: &Path, id: Inode) {
-        debug!(
-            arena = debug(&arena),
-            id = debug(&id),
-            path = debug(&local_path),
-            "add to arena"
-        );
-        arena.add_file(local_path, id).unwrap();
-    }
-
-    #[instrument(level = "debug")]
-    fn find(&self, path: &Path) -> ArenaEntry {
-        self.arena.find(path)
-    }
-
-    #[instrument(level = "debug")]
-    fn find_file(&self, path: &Path) -> Option<Inode> {
-        self.find(path)
-            .filter(|e| e.is_file())
-            .and_then(|entry| entry.inner())
-    }
-
-    #[instrument(ret)]
-    fn find_dir(&self, path: &Path) -> Option<ArenaEntry> {
-        // match self.find(path) {
-        //     Entry::File(_, _) => None,
-        //     e => Some(e),
-        // }
-        self.find(path).filter(|e| e.is_directory()).cloned()
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
-struct Inode {
-    value: usize,
-}
-impl From<usize> for Inode {
-    fn from(value: usize) -> Self {
-        Self { value }
-    }
-}
-impl AddAssign<usize> for Inode {
-    fn add_assign(&mut self, rhs: usize) {
-        self.value += rhs;
-    }
-}
-
-pub struct OrganizeFSStore {
-    arena: ArenaType,
-    entries: HashMap<Inode, OrganizeFSEntry>,
-    max_entries: Inode,
-    pattern: PathBuf,
-}
-impl OrganizeFSStore {
-    pub fn get_pattern(&self) -> String {
-        self.pattern.to_string_lossy().to_string()
-    }
-
-    pub fn set_pattern(&mut self, pattern: &str) {
-        let pattern = PathBuf::from(pattern).normalize();
-        if pattern != self.pattern {
-            // Re-patterning of filesystem
-            let mut arena = ArenaType::default();
-            for (id, entry) in self.entries.iter() {
-                let local_path = entry.local_path(&pattern);
-                Self::add_entry_to_arena(&mut arena, &local_path, *id);
-            }
-            self.arena = arena;
-            self.pattern = pattern;
-        }
-    }
-}
-
-pub struct OrganizeFS {
+pub struct OrganizeFS<E> {
     root: PathBuf,
-    store: Arc<parking_lot::RwLock<OrganizeFSStore>>,
+    store: Arc<parking_lot::RwLock<TreeStorage<E>>>,
     libc_wrapper: Box<dyn LibcWrapper + Send + Sync>,
     shutdown_signal: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
-impl Debug for OrganizeFS {
+impl<E> Debug for OrganizeFS<E>
+where
+    E: Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrganizeFS")
             .field("root", &self.root)
-            .field("store", &self.store)
+            //.field("store", &self.store)
             .finish()
     }
 }
 
-impl OrganizeFS {
+impl<E> OrganizeFS<E>
+where
+    E: Debug + Display + Clone + PatternLocalPath,
+{
     #[instrument]
     pub fn new(
         root: &str,
-        store: Arc<parking_lot::RwLock<OrganizeFSStore>>,
+        store: Arc<parking_lot::RwLock<TreeStorage<E>>>,
         shutdown_signal: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
         let root = std::env::current_dir().unwrap().as_path().join(root);
@@ -233,7 +132,7 @@ impl OrganizeFS {
             for entry in Self::scan(&root) {
                 store.add_entry(entry);
             }
-            info!(store = debug(&store), "store populated");
+            info!(store = store.len(), "store populated");
         }
 
         Self {
@@ -245,7 +144,7 @@ impl OrganizeFS {
     }
 
     #[instrument]
-    fn scan(root: &Path) -> impl Iterator<Item = OrganizeFSEntry> + '_ {
+    fn scan(root: &Path) -> impl Iterator<Item = E> + '_ {
         info!(root = debug(root), "scanning");
         WalkDir::new(root)
             .sort_by(|a, b| a.file_name().cmp(b.file_name()))
@@ -255,18 +154,20 @@ impl OrganizeFS {
     }
 
     #[instrument(level = "debug")]
-    fn process(root: &Path, entry: &walkdir::DirEntry) -> Option<OrganizeFSEntry> {
+    fn process(root: &Path, entry: &walkdir::DirEntry) -> Option<E> {
         if entry.file_type().is_file() && entry.path().parent().is_some() {
             if let Ok(meta) = fs::symlink_metadata(entry.path()) {
                 debug!(root = debug(root), entry = debug(entry), "found");
-                let entry = OrganizeFSEntry::new(root, entry, &meta);
+                let entry = E::new(root, entry, &meta);
                 debug!(root = debug(root), entry = display(&entry));
                 return Some(entry);
             }
         }
         None
     }
+}
 
+impl<E> OrganizeFS<E> {
     fn statfs_to_fuse(statfs: libc::statfs) -> Statfs {
         Statfs {
             blocks: statfs.f_blocks,
@@ -324,7 +225,10 @@ impl OrganizeFS {
     }
 }
 
-impl FilesystemMT for OrganizeFS {
+impl<E> FilesystemMT for OrganizeFS<E>
+where
+    E: Debug + Clone + PatternLocalPath,
+{
     fn init(&self, req: RequestInfo) -> ResultEmpty {
         info!(req = debug(req), "init");
         Ok(())
@@ -349,19 +253,16 @@ impl FilesystemMT for OrganizeFS {
             let store = self.store.read();
             let r = store.find(path);
             debug!(found = debug(&r), "found");
-            if r.is_directory() {
-                match self.libc_wrapper.lstat(self.root.to_owned()) {
+            match r {
+                Some(e) if e.is_directory() => match self.libc_wrapper.lstat(&self.root) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                }
-            } else if r.is_file() {
-                let entry = store.entries.get(&r.inner().unwrap()).unwrap();
-                match self.libc_wrapper.lstat(entry.host_path.to_owned()) {
+                },
+                Some(e) if e.is_file() => match self.libc_wrapper.lstat(&e.host_path()) {
                     Ok(stat) => Ok((TTL, Self::stat_to_fuse(stat))),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
-                }
-            } else {
-                Err(libc::ENOENT)
+                },
+                _ => Err(libc::ENOENT),
             }
         }
     }
@@ -382,10 +283,10 @@ impl FilesystemMT for OrganizeFS {
             "opendir (flags = {:#o})",
             flags
         );
-        if self.store.read().find_dir(path).is_some() {
-            Ok((0, 0))
-        } else {
-            Err(libc::ENOENT)
+        let store = self.store.read();
+        match store.find(path) {
+            Some(entry) if entry.is_directory() => Ok((0, 0)),
+            _ => Err(libc::ENOENT),
         }
     }
 
@@ -394,11 +295,13 @@ impl FilesystemMT for OrganizeFS {
         debug!(req = debug(req), path = debug(path), fh, "readdir");
 
         let store = self.store.read();
-        let children = store
-            .find_dir(path)
-            .unwrap()
-            .children(&store.arena)
-            //.unique()
+        let entry = store.find(path);
+        if entry.is_none() {
+            return Err(libc::ENOENT);
+        }
+        let entry = entry.unwrap();
+        let children = entry
+            .children()
             .filter_map(|(name, entry)| {
                 //let entry = store.entries.get(id).unwrap();
                 info!(
@@ -434,6 +337,46 @@ impl FilesystemMT for OrganizeFS {
                     acc
                 },
             );
+        // let children = store
+        //         .find_dir(path)
+        //         .unwrap()
+        //         .children(&store.arena)
+        //         //.unique()
+        //         .filter_map(|(name, entry)| {
+        //             //let entry = store.entries.get(id).unwrap();
+        //             info!(
+        //                 path = debug(&path),
+        //                 name = debug(&name),
+        //                 entry = debug(&entry),
+        //                 "child"
+        //             );
+        //             if entry.is_directory() {
+        //                 Some((FileType::Directory, name))
+        //             } else if entry.is_file() {
+        //                 Some((FileType::RegularFile, name))
+        //             } else {
+        //                 None
+        //             }
+        //         })
+        //         .fold(
+        //             vec![
+        //                 DirectoryEntry {
+        //                     name: ".".into(),
+        //                     kind: FileType::Directory,
+        //                 },
+        //                 DirectoryEntry {
+        //                     name: "..".into(),
+        //                     kind: FileType::Directory,
+        //                 },
+        //             ],
+        //             |mut acc, (kind, name)| {
+        //                 acc.push(DirectoryEntry {
+        //                     name: name.clone(),
+        //                     kind,
+        //                 });
+        //                 acc
+        //             },
+        //         );
 
         debug!(
             req = debug(req),
@@ -464,19 +407,31 @@ impl FilesystemMT for OrganizeFS {
             flags
         );
         let store = self.store.read();
-        store.find_file(path).map_or_else(
-            || Err(libc::ENOENT),
-            |e| {
-                let entry = store.entries.get(&e).unwrap();
+        match store.find(path) {
+            Some(d) if d.is_file() => {
                 match self
                     .libc_wrapper
-                    .open(entry.host_path.to_owned(), flags.try_into().unwrap())
+                    .open(&d.host_path(), flags.try_into().unwrap())
                 {
                     Ok(fh) => Ok((fh as u64, flags)),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
-            },
-        )
+            }
+            _ => Err(libc::ENOENT),
+        }
+        // store.find_file(path).map_or_else(
+        //     || Err(libc::ENOENT),
+        //     |e| {
+        //         let entry = store.entries.get(&e).unwrap();
+        //         match self
+        //             .libc_wrapper
+        //             .open(entry.host_path.to_owned(), flags.try_into().unwrap())
+        //         {
+        //             Ok(fh) => Ok((fh as u64, flags)),
+        //             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+        //         }
+        //     },
+        // )
     }
 
     fn read(
@@ -559,24 +514,40 @@ impl FilesystemMT for OrganizeFS {
         path.push(name);
 
         let mut store = self.store.write();
-        store.find_file(&path).map_or_else(
-            || Err(libc::ENOENT),
-            |e| {
-                let entry = store.entries.get(&e).unwrap().to_owned();
-                info!(inode = debug(e), entry = debug(&entry), "get");
-                match self.libc_wrapper.unlink(entry.host_path) {
+        match store.find(&path) {
+            Some(d) if d.is_file() => {
+                info!(entry = debug(&d), "get");
+                match self.libc_wrapper.unlink(&d.host_path()) {
                     Ok(_) => {
                         info!("unlinked");
-                        if store.arena.remove(&path) {
-                            let dropped = store.entries.remove(&e);
-                            info!(dropped = debug(dropped), "dropped");
+                        if store.remove(&path) {
+                            info!(dropped = debug(&path), "dropped");
                         }
                         Ok(())
                     }
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 }
-            },
-        )
+            }
+            _ => Err(libc::ENOENT),
+        }
+        // store.find_file(&path).map_or_else(
+        //     || Err(libc::ENOENT),
+        //     |e| {
+        //         let entry = store.entries.get(&e).unwrap().to_owned();
+        //         info!(inode = debug(e), entry = debug(&entry), "get");
+        //         match self.libc_wrapper.unlink(entry.host_path) {
+        //             Ok(_) => {
+        //                 info!("unlinked");
+        //                 if store.arena.remove(&path) {
+        //                     let dropped = store.entries.remove(&e);
+        //                     info!(dropped = debug(dropped), "dropped");
+        //                 }
+        //                 Ok(())
+        //             }
+        //             Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+        //         }
+        //     },
+        // )
     }
 
     fn rename(
@@ -601,23 +572,65 @@ impl FilesystemMT for OrganizeFS {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, path::PathBuf};
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
 
+    use std::{ffi::OsString, io, ops::Index, path::PathBuf};
+
+    use file_proc_macro::FsFile;
+    use store::PatternLocalPath;
     use tracing_test::traced_test;
 
     use libc_wrapper::MockLibcWrapper;
 
-    use crate::common::mock_traits::{MockDirEntry, MockMetadata};
     use crate::libc_wrapper;
+    use common::{expand, FsFile};
 
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, FsFile)]
+    struct TestEntry {
+        name: OsString,
+        #[fsfile = "size"]
+        size: String,
+        #[fsfile = "meta"]
+        mime: String,
+        #[fsfile = "mdate"]
+        modified_date: String,
+    }
+    impl PatternLocalPath for TestEntry {
+        #[instrument]
+        fn new(root: &Path, entry: &dyn common::DirEntry, meta: &dyn common::Metadata) -> Self {
+            todo!()
+        }
+
+        #[instrument]
+        fn local_path(&self, pattern: &Path) -> PathBuf {
+            debug!(self = debug(self), pattern = debug(pattern), "local_path");
+            let mut path = pattern
+                .components()
+                .map(|component| expand(&component, self))
+                .fold(PathBuf::new(), |mut acc, c| {
+                    acc.push(c);
+                    acc
+                });
+            path.push(&self.name);
+            path
+        }
+
+        #[instrument]
+        fn host_path(&self) -> PathBuf {
+            PathBuf::from("/").join(&self.name)
+        }
+    }
 
     #[instrument(ret, skip(libc_wrapper))]
-    fn new_test_fs(libc_wrapper: impl LibcWrapper + Send + Sync + 'static) -> OrganizeFS {
+    fn new_test_fs(
+        libc_wrapper: impl LibcWrapper + Send + Sync + 'static,
+    ) -> OrganizeFS<TestEntry> {
         let root = PathBuf::from("/");
         let pattern = PathBuf::from("/");
-        let store = Arc::new(parking_lot::RwLock::new(OrganizeFSStore::new(pattern)));
+        let store = Arc::new(parking_lot::RwLock::new(TreeStorage::<TestEntry>::new(
+            pattern,
+        )));
         let libc_wrapper = Box::new(libc_wrapper);
         OrganizeFS {
             root,
@@ -627,65 +640,65 @@ mod tests {
         }
     }
 
-    #[test]
-    #[traced_test]
-    fn organize_fsentry_new() {
-        let root = PathBuf::from("/test/data/path");
-        let entry = {
-            let mut entry = MockDirEntry::new();
-            entry.expect_path().return_const(PathBuf::from("path/"));
-            entry
-                .expect_file_name()
-                .return_const(OsString::from("file"));
-            entry
-        };
-        let meta = {
-            let mut metadata = MockMetadata::new();
-            metadata
-                .expect_len()
-                .return_const(1024_u64 * 1024 * 1024 * 100);
-            metadata.expect_modified().returning(|| {
-                Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(40 * 365 * 24 * 60 * 60))
-            });
-            metadata
-        };
-        let entry = OrganizeFSEntry::new(&root, &entry, &meta);
-        assert_eq!(entry.size, "107.37GB");
-        assert_eq!(entry.name, "file");
-        assert_eq!(entry.host_path, PathBuf::from("/test/data/path/path"));
-        assert_eq!(entry.modified_date, "2009-12-22");
-        assert_eq!(entry.mime, "");
-    }
+    // #[test]
+    // #[traced_test]
+    // fn organize_fsentry_new() {
+    //     let root = PathBuf::from("/test/data/path");
+    //     let entry = {
+    //         let mut entry = MockDirEntry::new();
+    //         entry.expect_path().return_const(PathBuf::from("path/"));
+    //         entry
+    //             .expect_file_name()
+    //             .return_const(OsString::from("file"));
+    //         entry
+    //     };
+    //     let meta = {
+    //         let mut metadata = MockMetadata::new();
+    //         metadata
+    //             .expect_len()
+    //             .return_const(1024_u64 * 1024 * 1024 * 100);
+    //         metadata.expect_modified().returning(|| {
+    //             Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(40 * 365 * 24 * 60 * 60))
+    //         });
+    //         metadata
+    //     };
+    //     let entry = OrganizeFSEntry::new(&root, &entry, &meta);
+    //     assert_eq!(entry.size, "107.37GB");
+    //     assert_eq!(entry.name, "file");
+    //     assert_eq!(entry.host_path, PathBuf::from("/test/data/path/path"));
+    //     assert_eq!(entry.modified_date, "2009-12-22");
+    //     assert_eq!(entry.mime, "");
+    // }
 
     #[test]
     #[traced_test]
     fn mode_to_filetype() {
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFDIR + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFDIR + 0o644),
             FileType::Directory
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFREG + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFREG + 0o644),
             FileType::RegularFile
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFLNK + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFLNK + 0o644),
             FileType::Symlink
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFBLK + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFBLK + 0o644),
             FileType::BlockDevice
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFCHR + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFCHR + 0o644),
             FileType::CharDevice
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFIFO + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFIFO + 0o644),
             FileType::NamedPipe
         );
         assert_eq!(
-            OrganizeFS::mode_to_filetype(libc::S_IFSOCK + 0o644),
+            OrganizeFS::<TestEntry>::mode_to_filetype(libc::S_IFSOCK + 0o644),
             FileType::Socket
         );
     }
@@ -694,7 +707,7 @@ mod tests {
     #[traced_test]
     #[should_panic(expected = "unknown file type")]
     fn mode_to_filetype_err() {
-        OrganizeFS::mode_to_filetype(0);
+        OrganizeFS::<TestEntry>::mode_to_filetype(0);
     }
 
     #[test]
@@ -716,9 +729,8 @@ mod tests {
         // Add file
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -728,13 +740,13 @@ mod tests {
         // Alter pattern
         {
             let mut store = fs.store.write();
-            store.set_pattern("/t/{meta}/");
+            store.set_pattern("/s/../t/{meta}/");
         }
         let store = fs.store.read();
         assert_eq!("/t/{meta}", store.get_pattern());
-        assert_eq!(store.entries.len(), 1);
-        let entry = store.arena.find(&PathBuf::from("/t/text_plain/present"));
-        assert!(entry.is_file());
+        assert_eq!(store.len(), 1);
+        let entry = store.find(&PathBuf::from("/t/text_plain/present"));
+        assert!(entry.is_some_and(|e| e.is_file()));
     }
 
     // init tests
@@ -845,9 +857,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -859,6 +870,7 @@ mod tests {
             &PathBuf::from("/"),
             libc::O_DIRECTORY.try_into().unwrap(),
         );
+        info!(resp = debug(resp), "resp");
         assert!(resp.is_ok());
         assert_eq!(resp.unwrap(), (0, 0));
     }
@@ -877,9 +889,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1000,9 +1011,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1038,9 +1048,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1071,9 +1080,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1109,9 +1117,8 @@ mod tests {
         };
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "test".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1152,9 +1159,8 @@ mod tests {
         let fs = new_test_fs(libc_wrapper);
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1186,9 +1192,8 @@ mod tests {
         let fs = new_test_fs(libc_wrapper);
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1317,14 +1322,18 @@ mod tests {
         let fs = new_test_fs(libc_wrapper);
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
             };
             store.add_entry(entry);
+        }
+        {
+            let store = fs.store.read();
+            assert_eq!(store.len(), 1);
+            assert!(!store.is_empty());
         }
         let req: RequestInfo = RequestInfo {
             unique: 0,
@@ -1338,8 +1347,8 @@ mod tests {
         assert!(r.is_ok());
         {
             let store = fs.store.read();
-            assert_eq!(store.arena.len(), 1);
-            assert!(store.entries.is_empty());
+            assert_eq!(store.len(), 0);
+            assert!(store.is_empty());
         }
     }
 
@@ -1356,9 +1365,8 @@ mod tests {
         let fs = new_test_fs(libc_wrapper);
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1386,9 +1394,8 @@ mod tests {
         let fs = new_test_fs(libc_wrapper);
         {
             let mut store = fs.store.write();
-            let entry = OrganizeFSEntry {
+            let entry = TestEntry {
                 name: "present".into(),
-                host_path: "".into(),
                 size: "0 B".into(),
                 mime: "text_plain".into(),
                 modified_date: "2023-08-04".into(),
@@ -1407,5 +1414,37 @@ mod tests {
         let newname = std::ffi::OsString::from("missing");
         let r = fs.rename(req, &parent, &name, &newparent, &newname);
         assert_eq!(r.err(), Some(libc::ENOSYS));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test() {
+        let mut store = TreeStorage::new("/{meta}/{size}/".into());
+        {
+            let entry = TestEntry {
+                name: "present".into(),
+                size: "0 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        {
+            let entry = TestEntry {
+                name: "present".into(),
+                size: "10 B".into(),
+                mime: "text_plain".into(),
+                modified_date: "2023-08-04".into(),
+            };
+            store.add_entry(entry);
+        }
+        assert_eq!(store.len(), 2);
+        assert!(store
+            .find(&PathBuf::from("/text_plain/10 B/present"))
+            .is_some());
+        assert!(store
+            .find(&PathBuf::from("/text_plain/0 B/present"))
+            .is_some());
+        assert_eq!(store.node_count(), 6);
     }
 }

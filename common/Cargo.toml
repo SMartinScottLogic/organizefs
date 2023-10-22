@@ -1,8 +1,10 @@
 [package]
-name = "arena"
+name = "common"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 tracing = {workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+mockall = { workspace = true }
+walkdir = { workspace = true }

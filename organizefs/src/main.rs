@@ -1,6 +1,7 @@
 use fuse_mt::{spawn_mount, FuseMT};
-use organizefs::{server, OrganizeFS, OrganizeFSStore};
+use organizefs::{server, OrganizeFS};
 use std::{env, ffi::OsStr, path::PathBuf, str::FromStr, sync::Arc};
+use store::TreeStorage;
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -30,9 +31,9 @@ async fn main() {
     ];
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let stats = Arc::new(parking_lot::RwLock::new(OrganizeFSStore::new(
-        PathBuf::from("/../s/../t/./{meta}/{size}"),
-    )));
+    let stats = Arc::new(parking_lot::RwLock::new(TreeStorage::new(PathBuf::from(
+        "/../s/../t/./{meta}/{size}",
+    ))));
     let organizefs = OrganizeFS::new(&args[1], stats.clone(), tx);
     let fs = spawn_mount(FuseMT::new(organizefs, 1), &args[2], &fuse_args[..]).unwrap();
 

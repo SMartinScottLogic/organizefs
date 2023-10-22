@@ -1,7 +1,7 @@
 use std::ops::Index;
 
+use common::FsFile;
 use file_proc_macro::FsFile;
-use organizefs::common::FsFile;
 
 #[derive(FsFile)]
 struct One {

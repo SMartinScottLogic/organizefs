@@ -1,7 +1,7 @@
-use core::fmt::Debug;
-use std::{ffi::OsStr, fs, path::Path, time::SystemTime};
+#![warn(missing_docs)]
 
 use mockall::automock;
+use std::{ffi::OsStr, fmt::Debug, fs, path::Path, time::SystemTime};
 
 #[automock]
 pub trait DirEntry: Debug {
@@ -34,3 +34,8 @@ impl Metadata for fs::Metadata {
         self.modified()
     }
 }
+
+mod file;
+mod normalize;
+pub use file::{expand, FsFile};
+pub use normalize::Normalize;

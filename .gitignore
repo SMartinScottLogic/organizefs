@@ -14,6 +14,7 @@ Cargo.lock
 /target
 
 # App specific
+/store_old/
 /test_src/
 /test_tgt/
 /perf.data

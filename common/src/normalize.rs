@@ -2,11 +2,26 @@ use std::{ffi::OsString, path::PathBuf};
 
 use tracing::debug;
 
+/// Generate a normalized version of self
 pub trait Normalize {
+    /// Perform the normalization.
     fn normalize(&self) -> Self;
 }
 
+/// Generate a normalized version of a PathBuf
 impl Normalize for PathBuf {
+    /// Normalize a PathBuf.
+    ///
+    /// Removes CurDir (/./), and ParentDir(/../) components appropriately
+    ///
+    /// # Warning
+    /// DOES NOT follow symbolic links - resultant path may therefore NOT exist
+    /// # Examples
+    /// ```
+    /// # use std::path::PathBuf;
+    /// # use common::Normalize;
+    /// assert_eq!(PathBuf::from("/test/a/./b/../../").normalize(), PathBuf::from("/test/"));
+    /// ```
     fn normalize(&self) -> Self {
         let mut comps = Vec::new();
 

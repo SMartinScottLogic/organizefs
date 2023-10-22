@@ -1,3 +1,6 @@
+//! Define procedural macro(s) for files.
+#![warn(missing_docs)]
+
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
@@ -36,6 +39,8 @@ fn gen_mappings(fields: syn::Fields) -> Vec<quote::__private::TokenStream> {
     fields.iter().flat_map(gen_mapping).collect()
 }
 
+/// Define a derive macro `FsFile`, which adds index lookup on file metadata fields
+/// on a struct, used in local path expansion.
 #[proc_macro_derive(FsFile, attributes(fsfile, fail))]
 pub fn file_derive(input: TokenStream) -> TokenStream {
     let input: DeriveInput = parse_macro_input!(input);

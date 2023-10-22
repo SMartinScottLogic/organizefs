@@ -8,29 +8,28 @@ edition = "2021"
 [dependencies]
 axum = "0.6"
 fuse_mt = "0.6"
-humansize = {version = "2.1", features = ["impl_style"] }
 itertools = "0.11"
-lazy_static = "1.4"
 libc = "0.2"
 tokio = { version = "1.28", features = ["macros", "rt-multi-thread"] }
 tracing = {workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+mockall = { workspace = true }
 hyper = "0.14.25"
-walkdir = "2.3"
-# Determines the MIME type of a file by traversing a filetype tree.
-tree_magic_mini = "3.0"
-# A powerful mock object library for Rust.
-mockall = "0.11"
+walkdir = { workspace = true }
 indextree-ng = { version = "1.0" }
 parking_lot = "0.12.1"
+humansize = {version = "2.1", features = ["impl_style"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
+lazy_static = { workspace = true }
+# Determines the MIME type of a file by traversing a filetype tree.
+tree_magic_mini = "3.0"
 
-#[dependencies.common]
-#path="../common"
-
-[dependencies.arena]
-path="../arena"
+[dependencies.common]
+path="../common"
 
 [dependencies.file_proc_macro]
 path="../file_proc_macro"
+
+[dependencies.store]
+path="../store"
