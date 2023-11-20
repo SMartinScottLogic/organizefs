@@ -16,7 +16,7 @@ tokio = { version = "1.28", features = ["macros", "rt-multi-thread"] }
 tracing = {workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
-hyper = "0.14.25"
+hyper = "1.0.1"
 walkdir = "2.3"
 # Determines the MIME type of a file by traversing a filetype tree.
 tree_magic_mini = "3.0"
