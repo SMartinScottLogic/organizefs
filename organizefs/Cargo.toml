@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-axum = "0.6"
+axum = "0.7"
 fuse_mt = "0.6"
 humansize = {version = "2.1", features = ["impl_style"] }
 itertools = "0.11"
