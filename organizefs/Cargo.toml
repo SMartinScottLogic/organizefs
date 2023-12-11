@@ -21,7 +21,7 @@ walkdir = "2.3"
 # Determines the MIME type of a file by traversing a filetype tree.
 tree_magic_mini = "3.0"
 # A powerful mock object library for Rust.
-mockall = "0.11"
+mockall = "0.12"
 indextree-ng = { version = "1.0" }
 parking_lot = "0.12.1"
 time = { version = "0.3", features = ["formatting", "macros"] }
